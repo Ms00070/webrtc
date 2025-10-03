@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Video File Streamer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .video-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        video {
+            width: 640px;
+            height: 360px;
+            background-color: #000;
+            border: 1px solid #ccc;
+        }
+        .control-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f8f8f8;
+        }
+        button {
+            padding: 10px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+        }
+        .status {
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f0f0f0;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Video File Streamer</h1>
+        
+        <div class="video-container">
+            <div>
+                <h3>Video Source</h3>
+                <video id="localVideo" controls autoplay muted playsinline></video>
+            </div>
+        </div>
+        
+        <div class="control-panel">
+            <h3>Control Panel</h3>
+            <div>
+                <input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/ogg">
+                <p>Or enter local file path (must be accessible to this web page):</p>
+                <input type="text" id="videoPathInput" placeholder="e.g., C:\path\to\video.mp4" style="width: 400px;">
+                <button id="loadLocalPathBtn">Load Local Path</button>
+            </div>
+            <div>
+                <label for="peerId">Server Peer ID:</label>
+                <input type="text" id="peerId" value="VideoFileServer">
+            </div>
+            <div>
+                <button id="startStreamBtn" disabled>Start Streaming</button>
+                <button id="stopStreamBtn" disabled>Stop Streaming</button>
+            </div>
+        </div>
+        
+        <div>
+            <h3>Status Log</h3>
+            <div id="statusLog" class="status"></div>
+        </div>
+    </div>
+    
+    <script>
+        // DOM Elements
+        const localVideo = document.getElementById('localVideo');
+        const videoFileInput = document.getElementById('videoFileInput');
+        const videoPathInput = document.getElementById('videoPathInput');
+        const loadLocalPathBtn = document.getElementById('loadLocalPathBtn');
+        const peerIdInput = document.getElementById('peerId');
+        const startStreamBtn = document.getElementById('startStreamBtn');
+        const stopStreamBtn = document.getElementById('stopStreamBtn');
+        const statusLog = document.getElementById('statusLog');
+        
+        // WebRTC Variables
+        let localStream;
+        let peerConnections = {};
+        let ws;
+        let peerId;
+        
+        // Log messages to status div
+        function log(message, isError = false) {
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            if (isError) {
+                logEntry.style.color = 'red';
+            }
+            statusLog.appendChild(logEntry);
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+        
+        // Load video file from file input
+        videoFileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                localVideo.src = url;
+                localVideo.onloadedmetadata = () => {
+                    log(`Loaded video: ${file.name} (${Math.round(file.size / 1024 / 1024)}MB)`);
+                    startStreamBtn.disabled = false;
+                };
+            }
+        });
+        
+        // Load video from local path (note: this has security restrictions in browsers)
+        loadLocalPathBtn.addEventListener('click', () => {
+            const path = videoPathInput.value.trim();
+            if (path) {
+                try {
+                    // For security reasons, browsers restrict access to local file paths
+                    // This is a workaround that works in some scenarios
+                    localVideo.src = path;
+                    localVideo.onloadedmetadata = () => {
+                        log(`Loaded video from path: ${path}`);
+                        startStreamBtn.disabled = false;
+                    };
+                    localVideo.onerror = (e) => {
+                        log(`Error loading video from path: ${path}. Security restrictions may prevent this.`, true);
+                        log("Please use the file upload option instead.", true);
+                    };
+                } catch (e) {
+                    log(`Error loading video: ${e.message}`, true);
+                }
+            }
+        });
+        
+        // Start streaming
+        startStreamBtn.addEventListener('click', async () => {
+            try {
+                // Use the video element as the source for the stream
+                localStream = localVideo.captureStream();
+                
+                if (!localStream || localStream.getVideoTracks().length === 0) {
+                    throw new Error("No video available to stream");
+                }
+                
+                log(`Starting stream with ${localStream.getVideoTracks().length} video tracks and ${localStream.getAudioTracks().length} audio tracks`);
+                
+                // Make sure video starts playing
+                localVideo.play().catch(e => log(`Error playing video: ${e.message}`, true));
+                
+                // Connect to signaling server
+                connectToSignalingServer();
+                
+                startStreamBtn.disabled = true;
+                stopStreamBtn.disabled = false;
+            } catch (e) {
+                log(`Error starting stream: ${e.message}`, true);
+            }
+        });
+        
+        // Stop streaming
+        stopStreamBtn.addEventListener('click', () => {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            Object.values(peerConnections).forEach(pc => pc.close());
+            peerConnections = {};
+            
+            startStreamBtn.disabled = false;
+            stopStreamBtn.disabled = true;
+            log("Streaming stopped");
+        });
+        
+        // Connect to signaling server
+        function connectToSignalingServer() {
+            peerId = peerIdInput.value.trim();
+            if (!peerId) {
+                log("Please enter a server peer ID", true);
+                return;
+            }
+            
+            // Get WebSocket URL (use current page's hostname and port)
+            const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const wsUrl = `${protocol}${window.location.host}`;
+            
+            log(`Connecting to signaling server at ${wsUrl}...`);
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log("Connected to signaling server");
+                // Announce ourselves as a video sender
+                ws.send(`NEWPEER|${peerId}|ALL|New video file streaming server|0|true`);
+            };
+            
+            ws.onclose = () => {
+                log("Disconnected from signaling server", true);
+                startStreamBtn.disabled = false;
+                stopStreamBtn.disabled = true;
+            };
+            
+            ws.onerror = (error) => {
+                log(`WebSocket error: ${error}`, true);
+            };
+            
+            ws.onmessage = (event) => {
+                handleSignalingMessage(event.data);
+            };
+        }
+        
+        // Handle incoming signaling messages
+        function handleSignalingMessage(message) {
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const msgContent = parts[3];
+            
+            // Ignore messages not intended for us
+            if (receiverId !== peerId && receiverId !== 'ALL') {
+                return;
+            }
+            
+            log(`Received ${type} from ${senderId}`);
+            
+            switch (type) {
+                case 'NEWPEER':
+                case 'NEWPEERACK':
+                    if (senderId !== peerId) {
+                        log(`New peer connected: ${senderId}`);
+                        createPeerConnection(senderId);
+                    }
+                    break;
+                    
+                case 'OFFER':
+                    if (senderId !== peerId) {
+                        handleOffer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'ANSWER':
+                    if (senderId !== peerId && peerConnections[senderId]) {
+                        handleAnswer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'CANDIDATE':
+                    if (senderId !== peerId && peerConnections[senderId]) {
+                        handleCandidate(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'DISPOSE':
+                    if (senderId !== peerId && peerConnections[senderId]) {
+                        log(`Peer disconnected: ${senderId}`);
+                        peerConnections[senderId].close();
+                        delete peerConnections[senderId];
+                    }
+                    break;
+            }
+        }
+        
+        // Create a new WebRTC peer connection
+        function createPeerConnection(remotePeerId) {
+            log(`Creating connection with ${remotePeerId}`);
+            
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }
+                ]
+            };
+            
+            const pc = new RTCPeerConnection(configuration);
+            peerConnections[remotePeerId] = pc;
+            
+            // Add local media tracks (from the video file)
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                    log(`Added ${track.kind} track to connection`);
+                });
+            }
+            
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const candidateObj = {
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        candidate: event.candidate.candidate
+                    };
+                    
+                    ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(candidateObj)}|0|false`);
+                }
+            };
+            
+            // Handle connection state changes
+            pc.oniceconnectionstatechange = () => {
+                log(`ICE connection state with ${remotePeerId}: ${pc.iceConnectionState}`);
+            };
+            
+            // Create offer
+            pc.createOffer().then(offer => {
+                return pc.setLocalDescription(offer);
+            }).then(() => {
+                const offerObj = {
+                    type: 'offer',
+                    sdp: pc.localDescription.sdp
+                };
+                ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify(offerObj)}|0|true`);
+                log(`Sent offer to ${remotePeerId}`);
+            }).catch(e => {
+                log(`Error creating offer: ${e.message}`, true);
+            });
+            
+            return pc;
+        }
+        
+        // Handle incoming offer
+        function handleOffer(senderId, offerMsg) {
+            try {
+                const offerObj = JSON.parse(offerMsg);
+                
+                // Create peer connection if it doesn't exist
+                if (!peerConnections[senderId]) {
+                    createPeerConnection(senderId);
+                }
+                
+                const pc = peerConnections[senderId];
+                
+                pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'offer',
+                    sdp: offerObj.sdp
+                })).then(() => {
+                    return pc.createAnswer();
+                }).then(answer => {
+                    return pc.setLocalDescription(answer);
+                }).then(() => {
+                    const answerObj = {
+                        type: 'answer',
+                        sdp: pc.localDescription.sdp
+                    };
+                    ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answerObj)}|0|false`);
+                    log(`Sent answer to ${senderId}`);
+                }).catch(e => {
+                    log(`Error handling offer: ${e.message}`, true);
+                });
+            } catch (e) {
+                log(`Error processing offer: ${e.message}`, true);
+            }
+        }
+        
+        // Handle incoming answer
+        function handleAnswer(senderId, answerMsg) {
+            try {
+                const answerObj = JSON.parse(answerMsg);
+                const pc = peerConnections[senderId];
+                
+                pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answerObj.sdp
+                })).then(() => {
+                    log(`Processed answer from ${senderId}`);
+                }).catch(e => {
+                    log(`Error setting remote description: ${e.message}`, true);
+                });
+            } catch (e) {
+                log(`Error processing answer: ${e.message}`, true);
+            }
+        }
+        
+        // Handle incoming ICE candidate
+        function handleCandidate(senderId, candidateMsg) {
+            try {
+                const candidateObj = JSON.parse(candidateMsg);
+                const pc = peerConnections[senderId];
+                
+                pc.addIceCandidate(new RTCIceCandidate({
+                    sdpMid: candidateObj.sdpMid,
+                    sdpMLineIndex: candidateObj.sdpMLineIndex,
+                    candidate: candidateObj.candidate
+                })).catch(e => {
+                    log(`Error adding ICE candidate: ${e.message}`, true);
+                });
+            } catch (e) {
+                log(`Error processing candidate: ${e.message}`, true);
+            }
+        }
+        
+        // Auto-fill the video path if provided in the query string
+        window.addEventListener('load', () => {
+            const params = new URLSearchParams(window.location.search);
+            const path = params.get('path');
+            if (path) {
+                videoPathInput.value = decodeURIComponent(path);
+                log(`Auto-filled video path from URL: ${videoPathInput.value}`);
+            }
+        });
+    </script>
+</body>
+</html>

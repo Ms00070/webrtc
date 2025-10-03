@@ -1,0 +1,13 @@
+{
+  "name": "webrtc-signaling-server",
+  "version": "1.0.0",
+  "description": "Simple WebRTC signaling server for Unity",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.3"
+  }
+}
