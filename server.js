@@ -7,8 +7,46 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Middleware for JSON parsing
+app.use(express.json());
+
 // Serve static files from the "public" directory
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Add status endpoint for debugging
+app.get('/api/status', (req, res) => {
+  const status = {
+    clients: Array.from(clients.keys()),
+    videoSenders: Array.from(videoSenders.keys()),
+    pendingMessages: Object.fromEntries(
+      Array.from(pendingMessages.entries()).map(([key, messages]) => [
+        key,
+        {
+          count: messages.length,
+          types: messages.reduce((acc, msg) => {
+            const type = msg.split('|')[0];
+            acc[type] = (acc[type] || 0) + 1;
+            return acc;
+          }, {})
+        }
+      ])
+    )
+  };
+  
+  res.json(status);
+});
+
+// Add endpoint for Unity to check if server is ready
+app.get('/api/ready', (req, res) => {
+  const videoSendersCount = videoSenders.size;
+  res.json({
+    ready: videoSendersCount > 0,
+    videoSenders: Array.from(videoSenders.keys()),
+    message: videoSendersCount > 0 ? 
+      `Server ready with ${videoSendersCount} video senders` : 
+      'Server running but no video senders connected yet'
+  });
+});
 
 // Create HTTP server
 const server = http.createServer(app);
@@ -18,6 +56,12 @@ const wss = new WebSocket.Server({ server });
 
 // Store connected clients with their peer IDs
 const clients = new Map();
+
+// Store video senders for quick reconnection when new clients join
+const videoSenders = new Map();
+
+// Store pending offers and candidates for late-joining clients
+const pendingMessages = new Map();
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
@@ -45,8 +89,37 @@ wss.on('connection', (ws) => {
         clients.set(senderId, ws);
         console.log(`Registered client with ID: ${senderId}`);
         
+        // Check if this is a video sender
+        const isVideoSender = isVideoAudioSender === 'true';
+        if (isVideoSender) {
+          console.log(`Client ${senderId} registered as video sender`);
+          videoSenders.set(senderId, { ws, timestamp: Date.now() });
+        }
+        
         // Broadcast to all clients
         broadcastMessage(messageStr, ws);
+        
+        // If this is a new client (not a video sender), inform them about existing video senders
+        if (!isVideoSender) {
+          console.log(`Sending existing video senders to new client ${senderId}`);
+          videoSenders.forEach((sender, senderPeerId) => {
+            if (sender.ws.readyState === WebSocket.OPEN) {
+              // Send NEWPEER message from each video sender to the new client
+              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Existing video sender|0|true`;
+              ws.send(senderAnnouncement);
+              console.log(`Notified new client ${senderId} about existing video sender ${senderPeerId}`);
+            }
+          });
+        }
+        
+        // Send any pending messages for this client
+        if (pendingMessages.has(senderId)) {
+          console.log(`Delivering ${pendingMessages.get(senderId).length} pending messages to ${senderId}`);
+          pendingMessages.get(senderId).forEach(pendingMsg => {
+            ws.send(pendingMsg);
+          });
+          pendingMessages.delete(senderId);
+        }
       } 
       // Handle peer-to-peer messages
       else if (receiverId && receiverId !== 'ALL') {
@@ -73,7 +146,30 @@ wss.on('connection', (ws) => {
           console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
           targetClient.send(completeMessage);
         } else {
-          console.log(`Target client ${receiverId} not found or not connected`);
+          console.log(`Target client ${receiverId} not found or not connected - storing message`);
+          
+          // Store important messages (OFFER and CANDIDATE) for clients who haven't connected yet
+          if (type === 'OFFER' || type === 'CANDIDATE') {
+            if (!pendingMessages.has(receiverId)) {
+              pendingMessages.set(receiverId, []);
+            }
+            
+            // Store the complete message
+            pendingMessages.get(receiverId).push(completeMessage);
+            console.log(`Stored ${type} message for ${receiverId} (total pending: ${pendingMessages.get(receiverId).length})`);
+            
+            // For Unity clients, limit the number of stored messages to prevent memory issues
+            if (pendingMessages.get(receiverId).length > 100) {
+              // Keep important messages like the most recent OFFER
+              const offers = pendingMessages.get(receiverId).filter(msg => msg.startsWith('OFFER'));
+              const candidates = pendingMessages.get(receiverId).filter(msg => msg.startsWith('CANDIDATE')).slice(-20);
+              
+              // Replace with filtered messages (most recent offer and a reasonable number of candidates)
+              const filteredMessages = [...offers.slice(-1), ...candidates];
+              pendingMessages.set(receiverId, filteredMessages);
+              console.log(`Trimmed pending messages for ${receiverId} to ${filteredMessages.length} messages`);
+            }
+          }
         }
       }
       // Handle broadcast messages
@@ -90,7 +186,21 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (clientPeerId) {
       console.log(`Client ${clientPeerId} disconnected`);
+      
+      // Remove from clients map
       clients.delete(clientPeerId);
+      
+      // If it was a video sender, remove from video senders map
+      if (videoSenders.has(clientPeerId)) {
+        console.log(`Video sender ${clientPeerId} disconnected`);
+        videoSenders.delete(clientPeerId);
+      }
+      
+      // Clear any pending messages for this client
+      if (pendingMessages.has(clientPeerId)) {
+        console.log(`Clearing ${pendingMessages.get(clientPeerId).length} pending messages for ${clientPeerId}`);
+        pendingMessages.delete(clientPeerId);
+      }
       
       // Notify other clients about disconnection
       const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
@@ -130,6 +240,32 @@ function broadcastMessage(message, excludeClient) {
     }
   });
 }
+
+// Send periodic reminders about video senders to ensure Unity clients stay connected
+function sendVideoSenderReminders() {
+  // Get all video senders and Unity clients
+  const unityClients = new Map([...clients.entries()].filter(([id]) => id.includes('Unity')));
+  
+  if (videoSenders.size > 0 && unityClients.size > 0) {
+    console.log(`Sending video sender reminders to ${unityClients.size} Unity clients`);
+    
+    videoSenders.forEach((sender, senderPeerId) => {
+      if (sender.ws.readyState === WebSocket.OPEN) {
+        unityClients.forEach((unityClient, unityClientId) => {
+          if (unityClient.readyState === WebSocket.OPEN) {
+            // Send a NEWPEER reminder
+            const reminderMsg = `NEWPEER|${senderPeerId}|${unityClientId}|Video sender reminder|0|true`;
+            unityClient.send(reminderMsg);
+            console.log(`Sent reminder about ${senderPeerId} to Unity client ${unityClientId}`);
+          }
+        });
+      }
+    });
+  }
+}
+
+// Set up periodic reminder (every 10 seconds)
+setInterval(sendVideoSenderReminders, 10000);
 
 // Start the server
 server.listen(port, () => {
