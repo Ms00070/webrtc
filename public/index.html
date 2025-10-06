@@ -79,7 +79,20 @@
                 <input type="text" id="peerId" value="WebClient-User1">
             </div>
             <div>
-                <button id="startCamera">Start Camera</button>
+                <h4>Stream Source</h4>
+                <div>
+                    <input type="radio" id="cameraSource" name="streamSource" value="camera" checked>
+                    <label for="cameraSource">Camera</label>
+                    <input type="radio" id="fileSource" name="streamSource" value="file">
+                    <label for="fileSource">Video File</label>
+                </div>
+                <div id="fileInputContainer" style="display: none; margin-top: 10px;">
+                    <input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/ogg">
+                    <video id="fileVideo" style="display: none;" controls></video>
+                </div>
+            </div>
+            <div>
+                <button id="startStreamBtn">Start Stream</button>
                 <button id="connectBtn" disabled>Connect to Signaling Server</button>
                 <button id="disconnectBtn" disabled>Disconnect</button>
             </div>
@@ -100,13 +113,18 @@
         // DOM elements
         const localVideo = document.getElementById('localVideo');
         const remoteVideo = document.getElementById('remoteVideo');
+        const fileVideo = document.getElementById('fileVideo');
         const peerIdInput = document.getElementById('peerId');
-        const startCameraBtn = document.getElementById('startCamera');
+        const startStreamBtn = document.getElementById('startStreamBtn');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
         const dataMessageInput = document.getElementById('dataMessage');
         const sendDataBtn = document.getElementById('sendDataBtn');
         const statusLog = document.getElementById('statusLog');
+        const cameraSourceRadio = document.getElementById('cameraSource');
+        const fileSourceRadio = document.getElementById('fileSource');
+        const fileInputContainer = document.getElementById('fileInputContainer');
+        const videoFileInput = document.getElementById('videoFileInput');
         
         // WebRTC variables
         let localStream;
@@ -126,19 +144,61 @@
             statusLog.scrollTop = statusLog.scrollHeight;
         }
         
-        // Start camera
-        startCameraBtn.addEventListener('click', async () => {
+        // Handle stream source selection
+        cameraSourceRadio.addEventListener('change', () => {
+            if (cameraSourceRadio.checked) {
+                fileInputContainer.style.display = 'none';
+            }
+        });
+        
+        fileSourceRadio.addEventListener('change', () => {
+            if (fileSourceRadio.checked) {
+                fileInputContainer.style.display = 'block';
+            }
+        });
+        
+        // Handle video file selection
+        videoFileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                fileVideo.src = url;
+                fileVideo.onloadedmetadata = () => {
+                    log(`Loaded video: ${file.name} (${Math.round(file.size / 1024 / 1024)}MB)`);
+                };
+            }
+        });
+        
+        // Start stream (either camera or video file)
+        startStreamBtn.addEventListener('click', async () => {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    video: true,
-                    audio: true
-                });
-                localVideo.srcObject = localStream;
-                startCameraBtn.disabled = true;
+                if (cameraSourceRadio.checked) {
+                    // Start camera stream
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: true
+                    });
+                    localVideo.srcObject = localStream;
+                    log('Camera started successfully');
+                } else {
+                    // Use video file as stream source
+                    if (!videoFileInput.files[0]) {
+                        log('Please select a video file first', true);
+                        return;
+                    }
+                    
+                    // Play the video and capture its stream
+                    fileVideo.style.display = 'block';
+                    await fileVideo.play();
+                    localStream = fileVideo.captureStream();
+                    localVideo.srcObject = localStream;
+                    log(`Streaming video file: ${videoFileInput.files[0].name}`);
+                }
+                
+                startStreamBtn.disabled = true;
                 connectBtn.disabled = false;
-                log('Camera started successfully');
             } catch (error) {
-                log(`Error accessing camera: ${error.message}`, true);
+                log(`Error starting stream: ${error.message}`, true);
             }
         });
         
@@ -433,12 +493,21 @@
             }
             
             remoteVideo.srcObject = null;
+            
+            // Reset UI
+            startStreamBtn.disabled = false;
+            connectBtn.disabled = true;
         }
         
         // Handle page unload
         window.addEventListener('beforeunload', () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(`DISPOSE|${peerId}|ALL|Remove peerConnection for ${peerId}.|0|false`);
+            }
+            
+            // Clean up any object URLs to avoid memory leaks
+            if (fileVideo.src.startsWith('blob:')) {
+                URL.revokeObjectURL(fileVideo.src);
             }
         });
     </script>
