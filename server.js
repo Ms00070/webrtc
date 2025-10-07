@@ -33,6 +33,16 @@ app.get('/api/status', (req, res) => {
         }
       ])
     ),
+    activeSessions: Object.fromEntries(
+      Array.from(activeWebRTCSessions.entries()).map(([key, session]) => [
+        key,
+        {
+          hasOffer: !!session.offer,
+          candidatesCount: session.candidates.length,
+          connectedReceivers: session.connectedReceivers.size
+        }
+      ])
+    ),
     connections: Array.from(activeConnections.entries()).map(([key, conn]) => ({
       pair: key,
       state: conn.state,
@@ -47,14 +57,16 @@ app.get('/api/status', (req, res) => {
 app.get('/api/ready', (req, res) => {
   const videoSendersCount = videoSenders.size;
   const unityReceiversCount = unityReceivers.size;
+  const activeSessions = activeWebRTCSessions.size;
   
   res.json({
     ready: videoSendersCount > 0,
     videoSenders: Array.from(videoSenders.keys()),
     unityReceivers: Array.from(unityReceivers.keys()),
     webClients: Array.from(webClients.keys()),
+    activeSessions: activeSessions,
     message: videoSendersCount > 0 ? 
-      `Server ready with ${videoSendersCount} video senders and ${unityReceiversCount} Unity receivers` : 
+      `Server ready with ${videoSendersCount} video senders, ${unityReceiversCount} Unity receivers, ${activeSessions} active sessions` : 
       'Server running but no video senders connected yet'
   });
 });
@@ -72,6 +84,7 @@ const unityReceivers = new Map(); // Unity clients that receive video
 const webClients = new Map(); // All web clients
 const pendingMessages = new Map(); // Messages waiting for clients
 const activeConnections = new Map(); // Track active P2P connections
+const activeWebRTCSessions = new Map(); // Track WebRTC session data for late-joining
 
 // Connection state tracking
 const CONNECTION_STATES = {
@@ -87,7 +100,8 @@ const CONFIG = {
   PENDING_MESSAGE_CLEANUP_INTERVAL: 30000, // 30 seconds
   CONNECTION_TIMEOUT: 60000, // 1 minute
   HEARTBEAT_INTERVAL: 30000, // 30 seconds
-  RECONNECTION_REMINDER_INTERVAL: 15000 // 15 seconds
+  RECONNECTION_REMINDER_INTERVAL: 10000, // 10 seconds (more frequent)
+  LATE_JOIN_RETRY_INTERVAL: 5000 // 5 seconds for late-joining clients
 };
 
 // Handle WebSocket connections
@@ -145,6 +159,16 @@ wss.on('connection', (ws) => {
             connectedReceivers: new Set()
           });
           
+          // Initialize WebRTC session tracking for this sender
+          if (!activeWebRTCSessions.has(senderId)) {
+            activeWebRTCSessions.set(senderId, {
+              offer: null,
+              candidates: [],
+              connectedReceivers: new Set(),
+              lastOfferTime: Date.now()
+            });
+          }
+          
           if (!isUnityClient) {
             webClients.set(senderId, { ws, timestamp: Date.now() });
           }
@@ -160,7 +184,8 @@ wss.on('connection', (ws) => {
             connectedSenders: new Set()
           });
           
-          // Connect this Unity receiver to all existing video senders
+          // CRITICAL: Connect this Unity receiver to all existing video senders
+          // This handles the late-joining scenario
           connectUnityReceiverToVideoSenders(senderId);
           
         } else {
@@ -175,7 +200,7 @@ wss.on('connection', (ws) => {
         // Send pending messages for this client
         deliverPendingMessages(senderId);
       } 
-      // Handle peer-to-peer messages with SFU logic
+      // Handle peer-to-peer messages with session tracking
       else if (receiverId && receiverId !== 'ALL') {
         handleDirectMessage(type, senderId, receiverId, msgContent, messageStr);
       }
@@ -250,18 +275,20 @@ function connectVideoSenderToUnityReceivers(senderId) {
   });
 }
 
-// SFU Logic: Connect Unity receiver to all video senders
+// Enhanced SFU Logic: Connect Unity receiver to all video senders with session replay
 function connectUnityReceiverToVideoSenders(receiverId) {
-  console.log(`Connecting Unity receiver ${receiverId} to video senders`);
+  console.log(`Connecting Unity receiver ${receiverId} to video senders (handling late-join)`);
   
   videoSenders.forEach((sender, senderId) => {
     if (sender.ws.readyState === WebSocket.OPEN) {
+      console.log(`Processing connection: ${senderId} -> ${receiverId}`);
+      
       // Send NEWPEER from video sender to Unity receiver
       const connectionMsg = `NEWPEER|${senderId}|${receiverId}|Video sender connection|0|true`;
       const receiverClient = unityReceivers.get(receiverId);
       if (receiverClient && receiverClient.ws.readyState === WebSocket.OPEN) {
         receiverClient.ws.send(connectionMsg);
-        console.log(`Connected video sender ${senderId} to Unity receiver ${receiverId}`);
+        console.log(`Sent NEWPEER: ${senderId} -> ${receiverId}`);
         
         // Track the connection
         sender.connectedReceivers.add(receiverId);
@@ -273,12 +300,55 @@ function connectUnityReceiverToVideoSenders(receiverId) {
           state: CONNECTION_STATES.CONNECTING,
           lastActivity: Date.now()
         });
+        
+        // CRITICAL: Replay existing WebRTC session data for late-joining Unity client
+        replayWebRTCSessionForLateJoiner(senderId, receiverId);
       }
     }
   });
 }
 
-// Handle direct messages with SFU forwarding
+// NEW: Replay WebRTC session data for late-joining clients
+function replayWebRTCSessionForLateJoiner(senderId, receiverId) {
+  const session = activeWebRTCSessions.get(senderId);
+  if (!session) {
+    console.log(`No active session found for sender ${senderId}`);
+    return;
+  }
+  
+  const receiverClient = unityReceivers.get(receiverId);
+  if (!receiverClient || receiverClient.ws.readyState !== WebSocket.OPEN) {
+    console.log(`Receiver ${receiverId} not available for session replay`);
+    return;
+  }
+  
+  console.log(`Replaying WebRTC session from ${senderId} to late-joining ${receiverId}`);
+  
+  // Add a small delay to ensure NEWPEER is processed first
+  setTimeout(() => {
+    // Replay the offer if available
+    if (session.offer) {
+      const offerMsg = `OFFER|${senderId}|${receiverId}|${session.offer}|0|true`;
+      receiverClient.ws.send(offerMsg);
+      console.log(`Replayed OFFER: ${senderId} -> ${receiverId}`);
+    }
+    
+    // Replay ICE candidates with small delays
+    session.candidates.forEach((candidate, index) => {
+      setTimeout(() => {
+        const candidateMsg = `CANDIDATE|${senderId}|${receiverId}|${candidate}|0|true`;
+        receiverClient.ws.send(candidateMsg);
+        console.log(`Replayed CANDIDATE ${index + 1}/${session.candidates.length}: ${senderId} -> ${receiverId}`);
+      }, index * 100); // 100ms delay between candidates
+    });
+    
+    // Mark this receiver as connected to the session
+    session.connectedReceivers.add(receiverId);
+    
+  }, 500); // 500ms delay before starting replay
+}
+
+// Enhanced direct message handling with session tracking
 function handleDirectMessage(type, senderId, receiverId, msgContent, completeMessage) {
   // Ensure message has complete format
   let formattedMessage = completeMessage;
@@ -290,6 +360,25 @@ function handleDirectMessage(type, senderId, receiverId, msgContent, completeMes
     if (parts.length === 4) parts.push('0');
     if (parts.length === 5) parts.push('false');
     formattedMessage = parts.join('|');
+  }
+  
+  // Track WebRTC session data for video senders
+  if (videoSenders.has(senderId)) {
+    const session = activeWebRTCSessions.get(senderId);
+    if (session) {
+      if (type === 'OFFER') {
+        session.offer = msgContent;
+        session.lastOfferTime = Date.now();
+        console.log(`Stored OFFER from video sender ${senderId}`);
+      } else if (type === 'CANDIDATE') {
+        session.candidates.push(msgContent);
+        // Keep only the last 20 candidates to prevent memory bloat
+        if (session.candidates.length > 20) {
+          session.candidates = session.candidates.slice(-20);
+        }
+        console.log(`Stored CANDIDATE from video sender ${senderId} (total: ${session.candidates.length})`);
+      }
+    }
   }
   
   // Update connection state
@@ -369,6 +458,9 @@ function cleanupClient(clientId) {
       }
     });
     videoSenders.delete(clientId);
+    
+    // Clean up WebRTC session data
+    activeWebRTCSessions.delete(clientId);
   }
   
   if (unityReceivers.has(clientId)) {
@@ -377,6 +469,10 @@ function cleanupClient(clientId) {
     receiver.connectedSenders.forEach(senderId => {
       if (videoSenders.has(senderId)) {
         videoSenders.get(senderId).connectedReceivers.delete(clientId);
+      }
+      // Remove from session tracking
+      if (activeWebRTCSessions.has(senderId)) {
+        activeWebRTCSessions.get(senderId).connectedReceivers.delete(clientId);
       }
     });
     unityReceivers.delete(clientId);
@@ -412,24 +508,24 @@ function broadcastMessage(message, excludeClient) {
   });
 }
 
-// Periodic connection health check and reconnection assistance
+// Enhanced connection health check and reconnection assistance
 function performHealthCheck() {
   const now = Date.now();
   
   // Check for stale connections
   for (const [connectionKey, connection] of activeConnections.entries()) {
     if (now - connection.lastActivity > CONFIG.CONNECTION_TIMEOUT) {
-      console.log(`Connection ${connectionKey} appears stale, marking as failed`);
+      console.log(`Connection ${connectionKey} appears stale, attempting recovery`);
       connection.state = CONNECTION_STATES.FAILED;
       
       // Try to re-establish connection
       const [senderId, receiverId] = connectionKey.split('->');
       if (clients.has(senderId) && clients.has(receiverId)) {
-        console.log(`Attempting to re-establish connection between ${senderId} and ${receiverId}`);
-        const reconnectMsg = `NEWPEER|${senderId}|${receiverId}|Reconnection attempt|0|true`;
-        const receiverClient = clients.get(receiverId);
-        if (receiverClient && receiverClient.ws.readyState === WebSocket.OPEN) {
-          receiverClient.ws.send(reconnectMsg);
+        console.log(`Re-establishing connection between ${senderId} and ${receiverId}`);
+        
+        // If it's a video sender to Unity receiver connection, replay the session
+        if (videoSenders.has(senderId) && unityReceivers.has(receiverId)) {
+          replayWebRTCSessionForLateJoiner(senderId, receiverId);
         }
       }
     }
@@ -446,7 +542,6 @@ function performHealthCheck() {
 
 // Periodic cleanup of pending messages
 function cleanupPendingMessages() {
-  const now = Date.now();
   for (const [clientId, messages] of pendingMessages.entries()) {
     // Remove pending messages for clients that haven't connected in a while
     if (!clients.has(clientId)) {
@@ -456,24 +551,31 @@ function cleanupPendingMessages() {
   }
 }
 
-// Enhanced connection reminders for Unity clients
-function sendConnectionReminders() {
-  // Only send reminders if we have video senders and Unity receivers
+// Enhanced connection assistance for Unity clients
+function assistUnityConnections() {
+  // Help Unity receivers that might have missed connections
   if (videoSenders.size > 0 && unityReceivers.size > 0) {
-    console.log(`Sending connection reminders: ${videoSenders.size} senders, ${unityReceivers.size} receivers`);
+    console.log(`Assisting Unity connections: ${videoSenders.size} senders, ${unityReceivers.size} receivers`);
     
-    videoSenders.forEach((sender, senderId) => {
-      if (sender.ws.readyState === WebSocket.OPEN) {
-        unityReceivers.forEach((receiver, receiverId) => {
-          if (receiver.ws.readyState === WebSocket.OPEN) {
-            // Check if they're already connected
+    unityReceivers.forEach((receiver, receiverId) => {
+      if (receiver.ws.readyState === WebSocket.OPEN) {
+        videoSenders.forEach((sender, senderId) => {
+          if (sender.ws.readyState === WebSocket.OPEN) {
             const connectionKey = `${senderId}->${receiverId}`;
             const connection = activeConnections.get(connectionKey);
             
+            // If no connection exists or it's failed, try to establish/re-establish
             if (!connection || connection.state === CONNECTION_STATES.FAILED) {
-              const reminderMsg = `NEWPEER|${senderId}|${receiverId}|Connection reminder|0|true`;
+              console.log(`Assisting connection: ${senderId} -> ${receiverId}`);
+              
+              // Send connection reminder
+              const reminderMsg = `NEWPEER|${senderId}|${receiverId}|Connection assistance|0|true`;
               receiver.ws.send(reminderMsg);
-              console.log(`Sent connection reminder: ${senderId} -> ${receiverId}`);
+              
+              // Replay session data after a short delay
+              setTimeout(() => {
+                replayWebRTCSessionForLateJoiner(senderId, receiverId);
+              }, 1000);
             }
           }
         });
@@ -485,7 +587,7 @@ function sendConnectionReminders() {
 // Set up periodic tasks
 setInterval(performHealthCheck, CONFIG.HEARTBEAT_INTERVAL);
 setInterval(cleanupPendingMessages, CONFIG.PENDING_MESSAGE_CLEANUP_INTERVAL);
-setInterval(sendConnectionReminders, CONFIG.RECONNECTION_REMINDER_INTERVAL);
+setInterval(assistUnityConnections, CONFIG.RECONNECTION_REMINDER_INTERVAL);
 
 // Graceful shutdown
 process.on('SIGINT', () => {
@@ -511,5 +613,5 @@ process.on('SIGINT', () => {
 // Start the server
 server.listen(port, () => {
   console.log(`Enhanced WebRTC Signaling Server running on port ${port}`);
-  console.log(`Features: SFU pattern, multi-client support, connection health monitoring`);
+  console.log(`Features: SFU pattern, multi-client support, late-join handling, session replay`);
 });
