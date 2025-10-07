@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Receiver</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .video-container {
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        .video-label {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        video {
+            width: 100%;
+            display: block;
+            background-color: #000;
+        }
+        .control-panel {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        .status-log {
+            height: 200px;
+            overflow-y: auto;
+            background-color: #222;
+            color: #0f0;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        input[type="text"] {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 250px;
+            font-size: 16px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .server-info {
+            background-color: #e6f7ff;
+            border-left: 4px solid #1890ff;
+            padding: 10px 15px;
+            margin-bottom: 20px;
+            border-radius: 0 4px 4px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Video Receiver</h1>
+        
+        <div class="server-info">
+            <p><strong>Server URL:</strong> <span id="serverUrl">https://webrtc-9gdy.onrender.com</span></p>
+            <p><strong>Status:</strong> <span id="connectionStatus">Disconnected</span></p>
+        </div>
+        
+        <div class="control-panel">
+            <div class="form-group">
+                <label for="peerId">Your Receiver ID:</label>
+                <input type="text" id="peerId" value="Browser-Receiver-1" />
+            </div>
+            
+            <div class="form-group">
+                <button id="connectBtn">Connect to Server</button>
+                <button id="disconnectBtn" disabled>Disconnect</button>
+            </div>
+        </div>
+        
+        <div class="video-grid" id="videoGrid"></div>
+        
+        <div>
+            <h3>Status Log</h3>
+            <div class="status-log" id="statusLog"></div>
+        </div>
+    </div>
+    
+    <script>
+        // DOM elements
+        const serverUrlElem = document.getElementById('serverUrl');
+        const connectionStatusElem = document.getElementById('connectionStatus');
+        const peerIdInput = document.getElementById('peerId');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const statusLog = document.getElementById('statusLog');
+        const videoGrid = document.getElementById('videoGrid');
+        
+        // Connection variables
+        let ws;
+        let peerId;
+        const peerConnections = new Map(); // Map of senderId -> RTCPeerConnection
+        const videoElements = new Map(); // Map of senderId -> video element
+        
+        // Initialize WebSocket URL
+        const serverUrl = 'wss://webrtc-9gdy.onrender.com';
+        
+        // Log messages to status log
+        function log(message, isError = false) {
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            if (isError) {
+                logEntry.style.color = '#ff4d4f';
+            }
+            statusLog.appendChild(logEntry);
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+        
+        // Create a video element for a sender
+        function createVideoElement(senderId) {
+            // Check if we already have a video for this sender
+            if (videoElements.has(senderId)) {
+                return videoElements.get(senderId);
+            }
+            
+            // Create container
+            const videoContainer = document.createElement('div');
+            videoContainer.className = 'video-container';
+            videoContainer.id = `container-${senderId}`;
+            
+            // Create video element
+            const videoElem = document.createElement('video');
+            videoElem.id = `video-${senderId}`;
+            videoElem.autoplay = true;
+            videoElem.playsInline = true;
+            videoContainer.appendChild(videoElem);
+            
+            // Create label
+            const videoLabel = document.createElement('div');
+            videoLabel.className = 'video-label';
+            videoLabel.textContent = senderId;
+            videoContainer.appendChild(videoLabel);
+            
+            // Add to grid
+            videoGrid.appendChild(videoContainer);
+            
+            // Store reference
+            videoElements.set(senderId, {
+                container: videoContainer,
+                video: videoElem,
+                label: videoLabel
+            });
+            
+            return videoElements.get(senderId);
+        }
+        
+        // Connect to signaling server
+        connectBtn.addEventListener('click', () => {
+            peerId = peerIdInput.value.trim();
+            if (!peerId) {
+                log('Please enter a valid Receiver ID', true);
+                return;
+            }
+            
+            log(`Connecting to signaling server at ${serverUrl}...`);
+            connectionStatusElem.textContent = 'Connecting...';
+            connectionStatusElem.style.color = '#faad14';
+            
+            ws = new WebSocket(serverUrl);
+            
+            ws.onopen = () => {
+                log('Connected to signaling server');
+                connectionStatusElem.textContent = 'Connected';
+                connectionStatusElem.style.color = '#52c41a';
+                
+                // Send NEWPEER message to announce ourselves (as non-video sender)
+                ws.send(`NEWPEER|${peerId}|ALL|Browser receiver joined|0|false`);
+                
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            };
+            
+            ws.onclose = () => {
+                log('Disconnected from signaling server', true);
+                connectionStatusElem.textContent = 'Disconnected';
+                connectionStatusElem.style.color = '#ff4d4f';
+                
+                // Clean up all connections
+                cleanupAllConnections();
+                
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            };
+            
+            ws.onerror = (error) => {
+                log(`WebSocket error: ${error.message}`, true);
+                connectionStatusElem.textContent = 'Error';
+                connectionStatusElem.style.color = '#ff4d4f';
+            };
+            
+            ws.onmessage = (event) => {
+                handleSignalingMessage(event.data);
+            };
+        });
+        
+        // Disconnect from signaling server
+        disconnectBtn.addEventListener('click', () => {
+            if (ws) {
+                // Send DISPOSE message
+                ws.send(`DISPOSE|${peerId}|ALL|Receiver disconnected|0|false`);
+                ws.close();
+            }
+            
+            cleanupAllConnections();
+        });
+        
+        // Handle incoming signaling messages
+        function handleSignalingMessage(message) {
+            // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const msgContent = parts[3];
+            
+            // Ignore messages not intended for us
+            if (receiverId !== peerId && receiverId !== 'ALL') {
+                return;
+            }
+            
+            log(`Received ${type} from ${senderId}`);
+            
+            switch (type) {
+                case 'NEWPEER':
+                    // Check if this is a video sender
+                    const isVideoSender = parts[5] === 'true';
+                    if (isVideoSender && senderId !== peerId) {
+                        log(`New video sender detected: ${senderId}`);
+                        createPeerConnection(senderId);
+                    }
+                    break;
+                    
+                case 'OFFER':
+                    if (senderId !== peerId) {
+                        handleOffer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'ANSWER':
+                    if (senderId !== peerId) {
+                        handleAnswer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'CANDIDATE':
+                    if (senderId !== peerId) {
+                        handleCandidate(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'DISPOSE':
+                    if (senderId !== peerId) {
+                        log(`Peer ${senderId} disconnected`);
+                        cleanupConnection(senderId);
+                    }
+                    break;
+            }
+        }
+        
+        // Create RTCPeerConnection for a sender
+        function createPeerConnection(senderId) {
+            log(`Creating connection with ${senderId}`);
+            
+            // Don't create duplicate connections
+            if (peerConnections.has(senderId)) {
+                return;
+            }
+            
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }
+                ]
+            };
+            
+            const peerConnection = new RTCPeerConnection(configuration);
+            peerConnections.set(senderId, peerConnection);
+            
+            // Create video element
+            createVideoElement(senderId);
+            
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const candidateObj = {
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        candidate: event.candidate.candidate
+                    };
+                    
+                    ws.send(`CANDIDATE|${peerId}|${senderId}|${JSON.stringify(candidateObj)}`);
+                }
+            };
+            
+            // Handle connection state changes
+            peerConnection.oniceconnectionstatechange = () => {
+                log(`ICE connection state with ${senderId}: ${peerConnection.iceConnectionState}`);
+                
+                // Update UI based on connection state
+                const videoElem = videoElements.get(senderId);
+                if (videoElem) {
+                    if (peerConnection.iceConnectionState === 'connected' || 
+                        peerConnection.iceConnectionState === 'completed') {
+                        videoElem.container.style.border = '2px solid #52c41a';
+                        videoElem.label.style.backgroundColor = 'rgba(82, 196, 26, 0.6)';
+                    } else if (peerConnection.iceConnectionState === 'failed' || 
+                              peerConnection.iceConnectionState === 'disconnected') {
+                        videoElem.container.style.border = '2px solid #ff4d4f';
+                        videoElem.label.style.backgroundColor = 'rgba(255, 77, 79, 0.6)';
+                    }
+                }
+            };
+            
+            // Handle remote tracks
+            peerConnection.ontrack = (event) => {
+                log(`Received remote track from ${senderId}`);
+                const videoElem = videoElements.get(senderId);
+                if (videoElem) {
+                    videoElem.video.srcObject = event.streams[0];
+                    log(`Displaying video from ${senderId}`);
+                }
+            };
+            
+            // Handle data channel
+            peerConnection.ondatachannel = (event) => {
+                log(`Received data channel from ${senderId}`);
+                const dataChannel = event.channel;
+                
+                dataChannel.onmessage = (msgEvent) => {
+                    log(`Data from ${senderId}: ${msgEvent.data}`);
+                };
+                
+                dataChannel.onopen = () => {
+                    log(`Data channel with ${senderId} opened`);
+                };
+                
+                dataChannel.onclose = () => {
+                    log(`Data channel with ${senderId} closed`);
+                };
+            };
+            
+            return peerConnection;
+        }
+        
+        // Handle incoming offer
+        async function handleOffer(senderId, offerMessage) {
+            try {
+                log(`Processing offer from ${senderId}`);
+                const offerObj = JSON.parse(offerMessage);
+                
+                // Create peer connection if it doesn't exist
+                let peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    peerConnection = createPeerConnection(senderId);
+                }
+                
+                // Set remote description from offer
+                await peerConnection.setRemoteDescription(new RTCSessionDescription({
+                    type: 'offer',
+                    sdp: offerObj.sdp
+                }));
+                
+                // Create and set local description (answer)
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
+                // Send answer to sender
+                const answerObj = {
+                    type: 'answer',
+                    sdp: peerConnection.localDescription.sdp
+                };
+                
+                ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answerObj)}`);
+                log(`Sent answer to ${senderId}`);
+                
+            } catch (error) {
+                log(`Error handling offer from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Handle incoming answer
+        async function handleAnswer(senderId, answerMessage) {
+            try {
+                const peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    log(`No connection found for ${senderId}`, true);
+                    return;
+                }
+                
+                const answerObj = JSON.parse(answerMessage);
+                
+                await peerConnection.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answerObj.sdp
+                }));
+                
+                log(`Processed answer from ${senderId}`);
+            } catch (error) {
+                log(`Error handling answer from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Handle incoming ICE candidate
+        async function handleCandidate(senderId, candidateMessage) {
+            try {
+                const peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    log(`No connection found for ${senderId}`, true);
+                    return;
+                }
+                
+                const candidateObj = JSON.parse(candidateMessage);
+                
+                if (candidateObj.candidate) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate({
+                        sdpMid: candidateObj.sdpMid,
+                        sdpMLineIndex: candidateObj.sdpMLineIndex,
+                        candidate: candidateObj.candidate
+                    }));
+                }
+            } catch (error) {
+                log(`Error handling ICE candidate from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Clean up a specific connection
+        function cleanupConnection(senderId) {
+            // Close peer connection
+            const peerConnection = peerConnections.get(senderId);
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnections.delete(senderId);
+            }
+            
+            // Remove video element
+            const videoElem = videoElements.get(senderId);
+            if (videoElem) {
+                videoGrid.removeChild(videoElem.container);
+                videoElements.delete(senderId);
+            }
+            
+            log(`Cleaned up connection with ${senderId}`);
+        }
+        
+        // Clean up all connections
+        function cleanupAllConnections() {
+            // Close all peer connections
+            peerConnections.forEach((connection, senderId) => {
+                connection.close();
+                log(`Closed connection with ${senderId}`);
+            });
+            peerConnections.clear();
+            
+            // Remove all video elements
+            videoElements.forEach((elements, senderId) => {
+                videoGrid.removeChild(elements.container);
+            });
+            videoElements.clear();
+            
+            // Clear the video grid
+            videoGrid.innerHTML = '';
+            
+            log('Cleaned up all connections');
+        }
+        
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`DISPOSE|${peerId}|ALL|Receiver disconnected|0|false`);
+            }
+            cleanupAllConnections();
+        });
+    </script>
+</body>
+</html>
