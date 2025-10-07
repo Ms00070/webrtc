@@ -1,506 +1,549 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const path = require('path');
-
-// Version 1.1.0 - Enhanced for Multiple Unity Clients Support
-
-// Create Express app
-const app = express();
-const port = process.env.PORT || 3000;
-
-// Middleware for JSON parsing
-app.use(express.json());
-
-// Serve static files from the "public" directory
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Store connected clients with their peer IDs
-const clients = new Map();
-
-// Store video senders for quick reconnection when new clients join
-const videoSenders = new Map();
-
-// Store pending offers and candidates for late-joining clients
-const pendingMessages = new Map();
-
-// Store active WebRTC sessions for multi-client support
-const activeWebRTCSessions = new Map();
-
-// Track active connection pairs (sender-receiver)
-const activeConnections = new Map();
-
-// Connection state tracking
-const CONNECTION_STATES = {
-  CONNECTING: 'connecting',
-  CONNECTED: 'connected',
-  DISCONNECTED: 'disconnected',
-  FAILED: 'failed'
-};
-
-// Add status endpoint for debugging
-app.get('/api/status', (req, res) => {
-  // Get list of Unity clients
-  const unityClients = Array.from(clients.keys())
-    .filter(id => id.includes('Unity'));
-
-  const status = {
-    clients: Array.from(clients.keys()),
-    unityClients: unityClients,
-    unityClientsCount: unityClients.length,
-    videoSenders: Array.from(videoSenders.keys()),
-    activeWebRTCSessions: Array.from(activeWebRTCSessions.entries()).map(([senderId, session]) => ({
-      senderId,
-      offerExists: !!session.offer,
-      candidatesCount: session.candidates.length,
-      connectedReceivers: Array.from(session.connectedReceivers || [])
-    })),
-    activeConnections: Array.from(activeConnections.entries()).map(([key, conn]) => ({
-      pair: key,
-      state: conn.state,
-      lastActivity: new Date(conn.lastActivity).toISOString()
-    })),
-    pendingMessages: Object.fromEntries(
-      Array.from(pendingMessages.entries()).map(([key, messages]) => [
-        key,
-        {
-          count: messages.length,
-          types: messages.reduce((acc, msg) => {
-            const type = msg.split('|')[0];
-            acc[type] = (acc[type] || 0) + 1;
-            return acc;
-          }, {})
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Receiver (Local)</title>
+    <!-- Same styles as before -->
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
         }
-      ])
-    )
-  };
-  
-  res.json(status);
-});
-
-// Add endpoint for Unity to check if server is ready
-app.get('/api/ready', (req, res) => {
-  const videoSendersCount = videoSenders.size;
-  const unityClientsCount = Array.from(clients.keys())
-    .filter(id => id.includes('Unity')).length;
-  const activeSessionsCount = activeWebRTCSessions.size;
-  
-  res.json({
-    ready: videoSendersCount > 0,
-    videoSenders: Array.from(videoSenders.keys()),
-    unityClientsCount: unityClientsCount,
-    activeSessionsCount: activeSessionsCount,
-    message: videoSendersCount > 0 ? 
-      `Server ready with ${videoSendersCount} video senders and ${unityClientsCount} Unity clients` : 
-      'Server running but no video senders connected yet'
-  });
-});
-
-// Create HTTP server
-const server = http.createServer(app);
-
-// Create WebSocket server
-const wss = new WebSocket.Server({ server });
-
-// Track connection pairs for debugging
-function trackConnection(senderId, receiverId, state) {
-  const key = `${senderId}-${receiverId}`;
-  activeConnections.set(key, {
-    state,
-    lastActivity: Date.now()
-  });
-}
-
-// Store WebRTC session data for multi-client support
-function storeWebRTCSessionData(senderId, offerSdp) {
-  // Store the offer for later use with new clients
-  if (!activeWebRTCSessions.has(senderId)) {
-    activeWebRTCSessions.set(senderId, {
-      offer: offerSdp,
-      candidates: [],
-      connectedReceivers: new Set()
-    });
-  } else {
-    activeWebRTCSessions.get(senderId).offer = offerSdp;
-  }
-  console.log(`Stored WebRTC session data for sender ${senderId}`);
-}
-
-// Send stored session data to a specific client
-function sendStoredSessionToClient(senderId, receiverId, clientWs) {
-  const session = activeWebRTCSessions.get(senderId);
-  if (!session || !session.offer) {
-    console.log(`No stored session data for ${senderId}`);
-    return false;
-  }
-  
-  // Send the stored offer
-  clientWs.send(`OFFER|${senderId}|${receiverId}|${session.offer}|0|true`);
-  console.log(`Sent stored offer from ${senderId} to client ${receiverId}`);
-  
-  // Send stored ICE candidates with small delays
-  if (session.candidates && session.candidates.length > 0) {
-    session.candidates.forEach((candidate, idx) => {
-      setTimeout(() => {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(`CANDIDATE|${senderId}|${receiverId}|${candidate}|0|true`);
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
         }
-      }, idx * 50); // Small delay between candidates
-    });
-  }
-  
-  // Mark this receiver as having received the session data
-  session.connectedReceivers.add(receiverId);
-  trackConnection(senderId, receiverId, CONNECTION_STATES.CONNECTING);
-  
-  return true;
-}
-
-// Handle direct message between peers
-function handleDirectMessage(type, senderId, receiverId, msgContent, completeMessage) {
-  // Ensure message has complete format
-  let formattedMessage = completeMessage;
-  const parts = completeMessage.split('|');
-  if (parts.length < 6) {
-    // Add missing parts with default values
-    while (parts.length < 4) {
-      parts.push(''); // Add empty strings for missing required parts
-    }
-    if (parts.length === 4) {
-      parts.push('0'); // Add default connection count
-    }
-    if (parts.length === 5) {
-      parts.push('false'); // Add default isVideoAudioSender flag
-    }
-    formattedMessage = parts.join('|');
-  }
-  
-  // Send to specific client
-  const targetClient = clients.get(receiverId);
-  if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-    console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
-    targetClient.send(formattedMessage);
-    
-    // Track connection state updates
-    if (type === 'OFFER') {
-      trackConnection(senderId, receiverId, CONNECTION_STATES.CONNECTING);
-    } else if (type === 'ANSWER') {
-      trackConnection(senderId, receiverId, CONNECTION_STATES.CONNECTED);
-    }
-    
-    return true;
-  } else {
-    console.log(`Target client ${receiverId} not found or not connected - storing message`);
-    
-    // Store important messages (OFFER and CANDIDATE) for clients who haven't connected yet
-    if (type === 'OFFER' || type === 'CANDIDATE') {
-      if (!pendingMessages.has(receiverId)) {
-        pendingMessages.set(receiverId, []);
-      }
-      
-      // Store the complete message
-      pendingMessages.get(receiverId).push(formattedMessage);
-      console.log(`Stored ${type} message for ${receiverId} (total pending: ${pendingMessages.get(receiverId).length})`);
-      
-      // For Unity clients, limit the number of stored messages to prevent memory issues
-      if (pendingMessages.get(receiverId).length > 100) {
-        // Keep important messages like the most recent OFFER
-        const offers = pendingMessages.get(receiverId).filter(msg => msg.startsWith('OFFER'));
-        const candidates = pendingMessages.get(receiverId).filter(msg => msg.startsWith('CANDIDATE')).slice(-20);
-        
-        // Replace with filtered messages (most recent offer and a reasonable number of candidates)
-        const filteredMessages = [...offers.slice(-1), ...candidates];
-        pendingMessages.set(receiverId, filteredMessages);
-        console.log(`Trimmed pending messages for ${receiverId} to ${filteredMessages.length} messages`);
-      }
-    }
-    
-    return false;
-  }
-}
-
-// Function to broadcast a message to all clients except the sender
-function broadcastMessage(message, excludeClient) {
-  // Ensure message has all 6 parts required by SimpleWebRTC
-  const parts = message.split('|');
-  if (parts.length < 6) {
-    // Add missing parts with default values
-    while (parts.length < 4) {
-      parts.push(''); // Add empty strings for missing required parts
-    }
-    if (parts.length === 4) {
-      parts.push('0'); // Add default connection count
-    }
-    if (parts.length === 5) {
-      parts.push('false'); // Add default isVideoAudioSender flag
-    }
-    message = parts.join('|');
-  }
-  
-  wss.clients.forEach((client) => {
-    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
-}
-
-// Handle WebSocket connections
-wss.on('connection', (ws) => {
-  console.log('Client connected');
-  let clientPeerId = null;
-  
-  // Handle messages from clients
-  ws.on('message', (message) => {
-    const messageStr = message.toString();
-    console.log(`Received message: ${messageStr}`);
-    
-    try {
-      // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
-      const parts = messageStr.split('|');
-      const type = parts[0];
-      const senderId = parts[1];
-      const receiverId = parts[2];
-      const msgContent = parts[3];
-      const connectionCount = parts[4] || '0';
-      const isVideoAudioSender = parts[5] || 'false';
-      
-      // Register client with its ID when it announces itself
-      if (type === 'NEWPEER') {
-        clientPeerId = senderId;
-        clients.set(senderId, ws);
-        console.log(`Registered client with ID: ${senderId}`);
-        
-        // Check if this is a video sender
-        const isVideoSender = isVideoAudioSender === 'true';
-        if (isVideoSender) {
-          console.log(`Client ${senderId} registered as video sender`);
-          videoSenders.set(senderId, { ws, timestamp: Date.now() });
+        h1 {
+            color: #333;
+            text-align: center;
         }
-        
-        // Broadcast to all clients
-        broadcastMessage(messageStr, ws);
-        
-        // If this is a new client (not a video sender), inform them about existing video senders
-        if (!isVideoSender) {
-          console.log(`Sending existing video senders to new client ${senderId}`);
-          
-          // Special handling for Unity clients to improve connection reliability
-          const isUnityClient = senderId.includes('Unity');
-          
-          videoSenders.forEach((sender, senderPeerId) => {
-            if (sender.ws.readyState === WebSocket.OPEN) {
-              // Send NEWPEER message from each video sender to the new client
-              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Existing video sender|0|true`;
-              ws.send(senderAnnouncement);
-              console.log(`Notified new client ${senderId} about existing video sender ${senderPeerId}`);
-
-              // If Unity client and we have stored session data, send it after a short delay
-              if (isUnityClient && activeWebRTCSessions.has(senderPeerId)) {
-                setTimeout(() => {
-                  if (ws.readyState === WebSocket.OPEN) {
-                    sendStoredSessionToClient(senderPeerId, senderId, ws);
-                  }
-                }, 1000);
-              }
-            }
-          });
-          
-          // If this is a Unity client, record it for special handling
-          if (isUnityClient) {
-            trackConnection(senderId, 'SERVER', CONNECTION_STATES.CONNECTED);
-          }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
         }
-        
-        // Send any pending messages for this client
-        if (pendingMessages.has(senderId)) {
-          console.log(`Delivering ${pendingMessages.get(senderId).length} pending messages to ${senderId}`);
-          pendingMessages.get(senderId).forEach(pendingMsg => {
-            ws.send(pendingMsg);
-          });
-          pendingMessages.delete(senderId);
+        .video-container {
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
         }
-      }
-      // Handle OFFER messages - store them for late joiners
-      else if (type === 'OFFER') {
-        // Store the offer for video senders
-        if (videoSenders.has(senderId)) {
-          storeWebRTCSessionData(senderId, msgContent);
+        .video-label {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 14px;
         }
+        video {
+            width: 100%;
+            display: block;
+            background-color: #000;
+        }
+        .control-panel {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        .status-log {
+            height: 200px;
+            overflow-y: auto;
+            background-color: #222;
+            color: #0f0;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        input[type="text"] {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 250px;
+            font-size: 16px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .server-info {
+            background-color: #e6f7ff;
+            border-left: 4px solid #1890ff;
+            padding: 10px 15px;
+            margin-bottom: 20px;
+            border-radius: 0 4px 4px 0;
+        }
+        .warning {
+            background-color: #fff7e6;
+            border-left: 4px solid #fa8c16;
+            padding: 10px 15px;
+            margin-bottom: 20px;
+            border-radius: 0 4px 4px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Video Receiver (Local File)</h1>
         
-        // Continue with normal message handling
-        handleDirectMessage(type, senderId, receiverId, msgContent, messageStr);
-      } 
-      // Handle CANDIDATE messages - store them for video senders
-      else if (type === 'CANDIDATE') {
-        // Store candidate for video senders
-        if (videoSenders.has(senderId)) {
-          const session = activeWebRTCSessions.get(senderId);
-          if (session) {
-            session.candidates.push(msgContent);
+        <div class="warning">
+            <strong>Local File Notice:</strong> This is a local HTML file connecting to a remote WebRTC server.
+        </div>
+        
+        <div class="server-info">
+            <p><strong>Server URL:</strong> <span id="serverUrl">wss://webrtc-9gdy.onrender.com</span></p>
+            <p><strong>Status:</strong> <span id="connectionStatus">Disconnected</span></p>
+        </div>
+        
+        <div class="control-panel">
+            <div class="form-group">
+                <label for="peerId">Your Receiver ID:</label>
+                <input type="text" id="peerId" value="Browser-Receiver-1" />
+            </div>
             
-            // If we already have connections to Unity clients, send them the candidate
-            const unityReceivers = Array.from(session.connectedReceivers)
-              .filter(id => id.includes('Unity'));
-              
-            if (unityReceivers.length > 0) {
-              unityReceivers.forEach(unityId => {
-                const unityClient = clients.get(unityId);
-                if (unityClient && unityClient.readyState === WebSocket.OPEN) {
-                  // Small delay to avoid overwhelming the client
-                  setTimeout(() => {
-                    unityClient.send(`CANDIDATE|${senderId}|${unityId}|${msgContent}|0|true`);
-                  }, 50);
-                }
-              });
-            }
-          }
-        }
+            <div class="form-group">
+                <button id="connectBtn">Connect to Server</button>
+                <button id="disconnectBtn" disabled>Disconnect</button>
+            </div>
+        </div>
         
-        // Continue with normal message handling
-        handleDirectMessage(type, senderId, receiverId, msgContent, messageStr);
-      }
-      // Handle other peer-to-peer messages
-      else if (receiverId && receiverId !== 'ALL') {
-        handleDirectMessage(type, senderId, receiverId, msgContent, messageStr);
-      }
-      // Handle broadcast messages
-      else if (receiverId === 'ALL') {
-        // Broadcast to all clients except sender
-        broadcastMessage(messageStr, ws);
-      }
-    } catch (err) {
-      console.error('Error processing message:', err);
-    }
-  });
-  
-  // Handle client disconnections
-  ws.on('close', () => {
-    if (clientPeerId) {
-      console.log(`Client ${clientPeerId} disconnected`);
-      
-      // Remove from clients map
-      clients.delete(clientPeerId);
-      
-      // If it was a video sender, remove from video senders map
-      if (videoSenders.has(clientPeerId)) {
-        console.log(`Video sender ${clientPeerId} disconnected`);
-        videoSenders.delete(clientPeerId);
+        <div class="video-grid" id="videoGrid"></div>
         
-        // Keep session data for a while in case sender reconnects
-        setTimeout(() => {
-          if (!videoSenders.has(clientPeerId)) {
-            // Only remove if still disconnected after timeout
-            activeWebRTCSessions.delete(clientPeerId);
-            console.log(`Removed WebRTC session data for ${clientPeerId} after timeout`);
-          }
-        }, 30000); // Keep data for 30 seconds
-      }
-      
-      // Clear any pending messages for this client
-      if (pendingMessages.has(clientPeerId)) {
-        console.log(`Clearing ${pendingMessages.get(clientPeerId).length} pending messages for ${clientPeerId}`);
-        pendingMessages.delete(clientPeerId);
-      }
-      
-      // Update connection states for this client
-      activeConnections.forEach((conn, key) => {
-        if (key.startsWith(`${clientPeerId}-`) || key.endsWith(`-${clientPeerId}`)) {
-          conn.state = CONNECTION_STATES.DISCONNECTED;
-          conn.lastActivity = Date.now();
-        }
-      });
-      
-      // Notify other clients about disconnection
-      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
-      broadcastMessage(disconnectMsg, null);
-    } else {
-      console.log('Unknown client disconnected');
-    }
-  });
-  
-  // Handle errors
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-  });
-});
-
-// Enhanced video sender reminder function for multiple Unity clients
-function sendVideoSenderReminders() {
-  // Get all Unity clients
-  const unityClients = new Map(
-    [...clients.entries()].filter(([id]) => id.includes('Unity'))
-  );
-  
-  if (videoSenders.size > 0 && unityClients.size > 0) {
-    console.log(`Sending video sender reminders to ${unityClients.size} Unity clients`);
+        <div>
+            <h3>Status Log</h3>
+            <div class="status-log" id="statusLog"></div>
+        </div>
+    </div>
     
-    videoSenders.forEach((sender, senderPeerId) => {
-      if (sender.ws.readyState === WebSocket.OPEN) {
-        // Get active session for this sender
-        const session = activeWebRTCSessions.get(senderPeerId);
+    <!-- Script section remains the same as before -->
+    <script>
+        // DOM elements
+        const serverUrlElem = document.getElementById('serverUrl');
+        const connectionStatusElem = document.getElementById('connectionStatus');
+        const peerIdInput = document.getElementById('peerId');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const statusLog = document.getElementById('statusLog');
+        const videoGrid = document.getElementById('videoGrid');
         
-        unityClients.forEach((unityClient, unityClientId) => {
-          if (unityClient.readyState === WebSocket.OPEN) {
-            // Check if this Unity client is already connected to this sender
-            const connectionKey = `${senderPeerId}-${unityClientId}`;
-            const connection = activeConnections.get(connectionKey);
-            
-            // Send a NEWPEER reminder
-            const reminderMsg = `NEWPEER|${senderPeerId}|${unityClientId}|Video sender reminder|0|true`;
-            unityClient.send(reminderMsg);
-            
-            // If we have a stored session and this client hasn't received it yet
-            // or if the connection is in a failed state
-            if (session && session.offer && 
-                (!session.connectedReceivers.has(unityClientId) || 
-                 (connection && connection.state === CONNECTION_STATES.FAILED))) {
-                 
-              // Delay sending offer to ensure NEWPEER is processed first
-              setTimeout(() => {
-                if (unityClient.readyState === WebSocket.OPEN) {
-                  sendStoredSessionToClient(senderPeerId, unityClientId, unityClient);
-                  console.log(`Re-sent offer from ${senderPeerId} to Unity client ${unityClientId}`);
-                }
-              }, 500);
+        // Connection variables
+        let ws;
+        let peerId;
+        const peerConnections = new Map(); // Map of senderId -> RTCPeerConnection
+        const videoElements = new Map(); // Map of senderId -> video element
+        
+        // Initialize WebSocket URL - direct to the hosted server
+        const serverUrl = 'wss://webrtc-9gdy.onrender.com';
+        
+        // Log messages to status log
+        function log(message, isError = false) {
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            if (isError) {
+                logEntry.style.color = '#ff4d4f';
             }
-          }
+            statusLog.appendChild(logEntry);
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+        
+        // Create a video element for a sender
+        function createVideoElement(senderId) {
+            // Check if we already have a video for this sender
+            if (videoElements.has(senderId)) {
+                return videoElements.get(senderId);
+            }
+            
+            // Create container
+            const videoContainer = document.createElement('div');
+            videoContainer.className = 'video-container';
+            videoContainer.id = `container-${senderId}`;
+            
+            // Create video element
+            const videoElem = document.createElement('video');
+            videoElem.id = `video-${senderId}`;
+            videoElem.autoplay = true;
+            videoElem.playsInline = true;
+            videoContainer.appendChild(videoElem);
+            
+            // Create label
+            const videoLabel = document.createElement('div');
+            videoLabel.className = 'video-label';
+            videoLabel.textContent = senderId;
+            videoContainer.appendChild(videoLabel);
+            
+            // Add to grid
+            videoGrid.appendChild(videoContainer);
+            
+            // Store reference
+            videoElements.set(senderId, {
+                container: videoContainer,
+                video: videoElem,
+                label: videoLabel
+            });
+            
+            return videoElements.get(senderId);
+        }
+        
+        // Connect to signaling server
+        connectBtn.addEventListener('click', () => {
+            peerId = peerIdInput.value.trim();
+            if (!peerId) {
+                log('Please enter a valid Receiver ID', true);
+                return;
+            }
+            
+            log(`Connecting to signaling server at ${serverUrl}...`);
+            connectionStatusElem.textContent = 'Connecting...';
+            connectionStatusElem.style.color = '#faad14';
+            
+            ws = new WebSocket(serverUrl);
+            
+            ws.onopen = () => {
+                log('Connected to signaling server');
+                connectionStatusElem.textContent = 'Connected';
+                connectionStatusElem.style.color = '#52c41a';
+                
+                // Send NEWPEER message to announce ourselves (as non-video sender)
+                ws.send(`NEWPEER|${peerId}|ALL|Browser receiver joined|0|false`);
+                
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            };
+            
+            ws.onclose = () => {
+                log('Disconnected from signaling server', true);
+                connectionStatusElem.textContent = 'Disconnected';
+                connectionStatusElem.style.color = '#ff4d4f';
+                
+                // Clean up all connections
+                cleanupAllConnections();
+                
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            };
+            
+            ws.onerror = (error) => {
+                log(`WebSocket error: ${error.message}`, true);
+                connectionStatusElem.textContent = 'Error';
+                connectionStatusElem.style.color = '#ff4d4f';
+            };
+            
+            ws.onmessage = (event) => {
+                handleSignalingMessage(event.data);
+            };
         });
-      }
-    });
-  }
-}
+        
+        // Disconnect from signaling server
+        disconnectBtn.addEventListener('click', () => {
+            if (ws) {
+                // Send DISPOSE message
+                ws.send(`DISPOSE|${peerId}|ALL|Receiver disconnected|0|false`);
+                ws.close();
+            }
+            
+            cleanupAllConnections();
+        });
+        
+        // Handle incoming signaling messages
+        function handleSignalingMessage(message) {
+            // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const msgContent = parts[3];
+            
+            // Ignore messages not intended for us
+            if (receiverId !== peerId && receiverId !== 'ALL') {
+                return;
+            }
+            
+            log(`Received ${type} from ${senderId}`);
+            
+            switch (type) {
+                case 'NEWPEER':
+                    // Check if this is a video sender
+                    const isVideoSender = parts[5] === 'true';
+                    if (isVideoSender && senderId !== peerId) {
+                        log(`New video sender detected: ${senderId}`);
+                        createPeerConnection(senderId);
+                    }
+                    break;
+                    
+                case 'OFFER':
+                    if (senderId !== peerId) {
+                        handleOffer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'ANSWER':
+                    if (senderId !== peerId) {
+                        handleAnswer(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'CANDIDATE':
+                    if (senderId !== peerId) {
+                        handleCandidate(senderId, msgContent);
+                    }
+                    break;
+                    
+                case 'DISPOSE':
+                    if (senderId !== peerId) {
+                        log(`Peer ${senderId} disconnected`);
+                        cleanupConnection(senderId);
+                    }
+                    break;
+            }
+        }
+        
+        // Create RTCPeerConnection for a sender
+        function createPeerConnection(senderId) {
+            log(`Creating connection with ${senderId}`);
+            
+            // Don't create duplicate connections
+            if (peerConnections.has(senderId)) {
+                return;
+            }
+            
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }
+                ]
+            };
+            
+            const peerConnection = new RTCPeerConnection(configuration);
+            peerConnections.set(senderId, peerConnection);
+            
+            // Create video element
+            createVideoElement(senderId);
+            
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const candidateObj = {
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        candidate: event.candidate.candidate
+                    };
+                    
+                    ws.send(`CANDIDATE|${peerId}|${senderId}|${JSON.stringify(candidateObj)}`);
+                }
+            };
+            
+            // Handle connection state changes
+            peerConnection.oniceconnectionstatechange = () => {
+                log(`ICE connection state with ${senderId}: ${peerConnection.iceConnectionState}`);
+                
+                // Update UI based on connection state
+                const videoElem = videoElements.get(senderId);
+                if (videoElem) {
+                    if (peerConnection.iceConnectionState === 'connected' || 
+                        peerConnection.iceConnectionState === 'completed') {
+                        videoElem.container.style.border = '2px solid #52c41a';
+                        videoElem.label.style.backgroundColor = 'rgba(82, 196, 26, 0.6)';
+                    } else if (peerConnection.iceConnectionState === 'failed' || 
+                              peerConnection.iceConnectionState === 'disconnected') {
+                        videoElem.container.style.border = '2px solid #ff4d4f';
+                        videoElem.label.style.backgroundColor = 'rgba(255, 77, 79, 0.6)';
+                    }
+                }
+            };
+            
+            // Handle remote tracks
+            peerConnection.ontrack = (event) => {
+                log(`Received remote track from ${senderId}`);
+                const videoElem = videoElements.get(senderId);
+                if (videoElem) {
+                    videoElem.video.srcObject = event.streams[0];
+                    log(`Displaying video from ${senderId}`);
+                }
+            };
+            
+            // Handle data channel
+            peerConnection.ondatachannel = (event) => {
+                log(`Received data channel from ${senderId}`);
+                const dataChannel = event.channel;
+                
+                dataChannel.onmessage = (msgEvent) => {
+                    log(`Data from ${senderId}: ${msgEvent.data}`);
+                };
+                
+                dataChannel.onopen = () => {
+                    log(`Data channel with ${senderId} opened`);
+                };
+                
+                dataChannel.onclose = () => {
+                    log(`Data channel with ${senderId} closed`);
+                };
+            };
+            
+            return peerConnection;
+        }
+        
+        // Handle incoming offer
+        async function handleOffer(senderId, offerMessage) {
+            try {
+                log(`Processing offer from ${senderId}`);
+                const offerObj = JSON.parse(offerMessage);
+                
+                // Create peer connection if it doesn't exist
+                let peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    peerConnection = createPeerConnection(senderId);
+                }
+                
+                // Set remote description from offer
+                await peerConnection.setRemoteDescription(new RTCSessionDescription({
+                    type: 'offer',
+                    sdp: offerObj.sdp
+                }));
+                
+                // Create and set local description (answer)
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
+                // Send answer to sender
+                const answerObj = {
+                    type: 'answer',
+                    sdp: peerConnection.localDescription.sdp
+                };
+                
+                ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answerObj)}`);
+                log(`Sent answer to ${senderId}`);
+                
+            } catch (error) {
+                log(`Error handling offer from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Handle incoming answer
+        async function handleAnswer(senderId, answerMessage) {
+            try {
+                const peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    log(`No connection found for ${senderId}`, true);
+                    return;
+                }
+                
+                const answerObj = JSON.parse(answerMessage);
+                
+                await peerConnection.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answerObj.sdp
+                }));
+                
+                log(`Processed answer from ${senderId}`);
+            } catch (error) {
+                log(`Error handling answer from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Handle incoming ICE candidate
+        async function handleCandidate(senderId, candidateMessage) {
+            try {
+                const peerConnection = peerConnections.get(senderId);
+                if (!peerConnection) {
+                    log(`No connection found for ${senderId}`, true);
+                    return;
+                }
+                
+                const candidateObj = JSON.parse(candidateMessage);
+                
+                if (candidateObj.candidate) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate({
+                        sdpMid: candidateObj.sdpMid,
+                        sdpMLineIndex: candidateObj.sdpMLineIndex,
+                        candidate: candidateObj.candidate
+                    }));
+                }
+            } catch (error) {
+                log(`Error handling ICE candidate from ${senderId}: ${error.message}`, true);
+            }
+        }
+        
+        // Clean up a specific connection
+        function cleanupConnection(senderId) {
+            // Close peer connection
+            const peerConnection = peerConnections.get(senderId);
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnections.delete(senderId);
+            }
+            
+            // Remove video element
+            const videoElem = videoElements.get(senderId);
+            if (videoElem) {
+                videoGrid.removeChild(videoElem.container);
+                videoElements.delete(senderId);
+            }
+            
+            log(`Cleaned up connection with ${senderId}`);
+        }
+        
+        // Clean up all connections
+        function cleanupAllConnections() {
+            // Close all peer connections
+            peerConnections.forEach((connection, senderId) => {
+                connection.close();
+                log(`Closed connection with ${senderId}`);
+            });
+            peerConnections.clear();
+            
+            // Remove all video elements
+            videoElements.forEach((elements, senderId) => {
+                videoGrid.removeChild(elements.container);
+            });
+            videoElements.clear();
+            
+            // Clear the video grid
+            videoGrid.innerHTML = '';
+            
+            log('Cleaned up all connections');
+        }
+        
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`DISPOSE|${peerId}|ALL|Receiver disconnected|0|false`);
+            }
+            cleanupAllConnections();
+        });
 
-// Set up periodic reminder (more frequent for better multi-client support)
-setInterval(sendVideoSenderReminders, 5000); // Every 5 seconds
-
-// Clean up pending messages periodically to prevent memory leaks
-function cleanupPendingMessages() {
-  for (const [clientId, messages] of pendingMessages.entries()) {
-    // Remove pending messages for clients that haven't connected in a while
-    if (!clients.has(clientId)) {
-      console.log(`Cleaning up ${messages.length} pending messages for inactive client ${clientId}`);
-      pendingMessages.delete(clientId);
-    }
-  }
-}
-
-// Clean up stale connections
-function cleanupStaleConnections() {
-  const now = Date.now();
-  const staleThreshold = 5 * 60 * 1000; // 5 minutes
-  
-  activeConnections.forEach((conn, key) => {
-    if (now - conn.lastActivity > staleThreshold) {
-      activeConnections.delete(key);
-    }
-  });
-}
-
-// Set up periodic cleanup
-setInterval(cleanupPendingMessages, 30000); // Every 30 seconds
-setInterval(cleanupStaleConnections, 60000); // Every minute
-
-// Start the server
-server.listen(port, () => {
-  console.log(`Multi-Unity WebRTC Server is running on port ${port}`);
-});
+        // Initial log message
+        log("Ready to connect. Click 'Connect to Server' to start receiving video.");
+    </script>
+</body>
+</html>
