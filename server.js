@@ -244,6 +244,10 @@ function broadcastMessage(message, excludeClient) {
   });
 }
 
+// Track which clients are currently receiving from which senders
+// This prevents one Unity client from "stealing" another's stream
+const activeStreamMap = new Map();
+
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
