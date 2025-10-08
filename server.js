@@ -18,11 +18,13 @@ const wss = new WebSocket.Server({ server });
 
 // Store connected clients with their peer IDs
 const clients = new Map();
+// Map to store pending ICE candidates until remote description is set
+const pendingIceCandidates = new Map();
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
-  let clientPeerId = null; // Fixed: Initialize with instead of empty assignment
+  let clientPeerId =;
   
   // Handle messages from clients
   ws.on('message', (message) => {
@@ -40,6 +42,58 @@ wss.on('connection', (ws) => {
         const msgContent = parts[3];
         const connectionCount = parts[4] || '0';
         const isVideoAudioSender = parts[5] || 'false';
+        
+        // Store ICE candidates if they arrive before ANSWER is processed
+        if (type === 'CANDIDATE') {
+          // If this is a candidate and we don't have a queue for this sender yet, create one
+          if (!pendingIceCandidates.has(senderId)) {
+            pendingIceCandidates.set(senderId, []);
+          }
+          
+          // Only queue candidates if they are from Unity (browser handles its own queueing)
+          if (senderId.startsWith('UnityClient')) {
+            console.log(`Queueing ICE candidate from ${senderId} for ${receiverId}`);
+            pendingIceCandidates.get(senderId).push(messageStr);
+            return; // Don't forward yet
+          }
+        }
+        
+        // When we get an ANSWER, we can process the pending candidates
+        if (type === 'ANSWER') {
+          // Forward the answer first
+          if (receiverId && clients.has(receiverId)) {
+            const targetClient = clients.get(receiverId);
+            if (targetClient.readyState === WebSocket.OPEN) {
+              targetClient.send(messageStr);
+              console.log(`Sent ANSWER from ${senderId} to ${receiverId}`);
+            }
+          }
+          
+          // Then send any pending candidates after a short delay
+          setTimeout(() => {
+            if (pendingIceCandidates.has(senderId)) {
+              const candidates = pendingIceCandidates.get(senderId);
+              console.log(`Sending ${candidates.length} queued ICE candidates from ${senderId}`);
+              
+              candidates.forEach(candidateMsg => {
+                const parts = candidateMsg.split('|');
+                const receiverId = parts[2];
+                
+                if (receiverId && clients.has(receiverId)) {
+                  const targetClient = clients.get(receiverId);
+                  if (targetClient.readyState === WebSocket.OPEN) {
+                    targetClient.send(candidateMsg);
+                  }
+                }
+              });
+              
+              // Clear the queue
+              pendingIceCandidates.delete(senderId);
+            }
+          }, 500); // Wait 500ms to ensure the ANSWER is processed
+          
+          return; // We've already forwarded the ANSWER
+        }
         
         // Register client with its ID when it announces itself
         if (type === 'NEWPEER') {
@@ -121,9 +175,14 @@ wss.on('connection', (ws) => {
       console.log(`Client ${clientPeerId} disconnected`);
       clients.delete(clientPeerId);
       
+      // Clean up any pending candidates
+      if (pendingIceCandidates.has(clientPeerId)) {
+        pendingIceCandidates.delete(clientPeerId);
+      }
+      
       // Notify other clients about disconnection
       const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
-      broadcastMessage(disconnectMsg,);
+      broadcastMessage(disconnectMsg, null);
     } else {
       console.log('Unknown client disconnected');
     }
