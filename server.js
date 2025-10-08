@@ -22,7 +22,7 @@ const clients = new Map();
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
-  let clientPeerId =;
+  let clientPeerId = null; // Fixed: Initialize with instead of empty assignment
   
   // Handle messages from clients
   ws.on('message', (message) => {
@@ -54,13 +54,13 @@ wss.on('connection', (ws) => {
         else if (receiverId && receiverId !== 'ALL') {
           // Ensure message has complete format
           let completeMessage = messageStr;
-          const parts = messageStr.split('|');
-          if (parts.length < 6) {
+          const messageParts = messageStr.split('|');
+          if (messageParts.length < 6) {
             // Add missing parts with default values
-            while (parts.length < 6) {
-              parts.push(parts.length === 4 ? '0' : parts.length === 5 ? 'false' : '');
+            while (messageParts.length < 6) {
+              messageParts.push(messageParts.length === 4 ? '0' : messageParts.length === 5 ? 'false' : '');
             }
-            completeMessage = parts.join('|');
+            completeMessage = messageParts.join('|');
           }
           
           // Send to specific client
