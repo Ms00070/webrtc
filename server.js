@@ -2,443 +2,60 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-const fs = require('fs');
-
-// Import custom modules
-const ServerWebRTC = require('./serverWebRTC');
-const VideoManager = require('./videoManager');
-
+ 
 // Express setup
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Middleware
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
-
+ 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ 
-  server,
-  // Allow WebSocket path selection
-  path: '/' 
-});
-
-// Initialize our modules
-const videoManager = new VideoManager();
-const serverWebRTC = new ServerWebRTC();
-
-// Map to store client connections
-const clients = new Map(); // clientId -> { ws, info, connectionTime }
-
-// Configure routes for video API
-app.get('/api/videos', (req, res) => {
-  res.json(videoManager.getVideos());
-});
-
-app.post('/api/videos', videoManager.getUploadMiddleware().single('video'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No video file uploaded' });
-  }
-  
-  const video = videoManager.addVideo(req.file);
-  
-  // Notify admin clients of new video
-  broadcastToAdmins({
-    type: 'admin-video-added',
-    video
-  });
-  
-  res.status(201).json(video);
-});
-
-app.delete('/api/videos/:id', (req, res) => {
-  const success = videoManager.deleteVideo(req.params.id);
-  
-  if (success) {
-    // Notify admin clients of deleted video
-    broadcastToAdmins({
-      type: 'admin-video-deleted',
-      videoId: req.params.id
-    });
-    
-    res.status(204).end();
-  } else {
-    res.status(404).json({ error: 'Video not found' });
-  }
-});
-
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-});
-
-// WebSocket connection handler
-wss.on('connection', (ws, req) => {
-  // Generate a unique client ID if not provided
-  let clientId;
-  let isAdmin = false;
-  let isUnityClient = false;
-  
-  // Check if this is an admin connection
-  if (req.url && req.url.startsWith('/admin')) {
-    clientId = `admin-${Date.now().toString()}`;
-    isAdmin = true;
-  } else {
-    clientId = Date.now().toString();
-  }
-  
-  // Store client connection
-  clients.set(clientId, { 
-    ws,
-    info: { id: clientId, isAdmin, isUnityClient },
-    connectionTime: new Date(),
-    status: 'connected'
-  });
-  
-  console.log(`Client connected: ${clientId} (Admin: ${isAdmin})`);
+const wss = new WebSocket.Server({ server });
+ 
+// Map to store clients
+const clients = new Map();
+ 
+wss.on('connection', (ws) => {
+  const clientId = Date.now().toString(); // unique client ID
+  clients.set(clientId, ws);
+  console.log(`Client connected: ${clientId}`);
   console.log(`Total clients: ${clients.size}`);
-  
-  // Send welcome message
-  ws.send(JSON.stringify({ 
-    type: 'welcome', 
-    clientId, 
-    clients: Array.from(clients.keys())
-  }));
-  
-  // Notify admin clients of new connection
-  if (!isAdmin) {
-    broadcastToAdmins({
-      type: 'admin-client-connected',
-      client: {
-        id: clientId,
-        connectedAt: new Date(),
-        status: 'connected',
-        isUnityClient
-      }
-    });
-  }
-  
-  // Message handler
-  ws.on('message', async (msg) => {
+ 
+  ws.send(JSON.stringify({ type: 'welcome', clientId, clients: Array.from(clients.keys()) }));
+ 
+  ws.on('message', (msg) => {
+    let data;
     try {
-      // Try to parse as JSON
-      let data;
-      let isRawProtocol = false;
-      
-      try {
-        const msgStr = msg.toString();
-        data = JSON.parse(msgStr);
-      } catch (err) {
-        // Not valid JSON, check if it might be the Unity custom protocol
-        // Format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
-        const text = msg.toString();
-        const parts = text.split('|');
-        
-        if (parts.length >= 4) {
-          isRawProtocol = true;
-          const [type, senderId, receiverId, message, connectionCount, isVideoAudioSender] = parts;
-          
-          // If this is a NEWPEER message, extract the client ID from it
-          if (type === 'NEWPEER' && senderId) {
-            // This is a Unity client
-            clientId = senderId;
-            isUnityClient = true;
-            
-            // Update client info
-            if (clients.has(clientId)) {
-              clients.delete(clientId); // Delete the temporary entry
-            }
-            
-            clients.set(clientId, { 
-              ws,
-              info: { id: clientId, isAdmin: false, isUnityClient: true },
-              connectionTime: new Date(),
-              status: 'connected'
-            });
-            
-            console.log(`Unity client identified: ${clientId}`);
-            
-            // Notify admins
-            broadcastToAdmins({
-              type: 'admin-client-connected',
-              client: {
-                id: clientId,
-                connectedAt: new Date(),
-                status: 'connected',
-                isUnityClient: true
-              }
-            });
-          }
-          
-          // Convert to our standard format
-          data = {
-            type,
-            from: senderId,
-            to: receiverId,
-            message
-          };
-          
-          // Special handling for custom protocol types
-          if (type === 'OFFER') {
-            data.type = 'offer';
-            data.sdp = message;
-          } else if (type === 'ANSWER') {
-            data.type = 'answer';
-            data.sdp = message;
-          } else if (type === 'CANDIDATE') {
-            data.type = 'ice-candidate';
-            try {
-              data.candidate = JSON.parse(message);
-            } catch (e) {
-              console.error('Error parsing ICE candidate:', e);
-            }
-          }
-        } else {
-          console.error('Invalid message format:', text);
-          return;
-        }
-      }
-      
-      // Handle admin requests
-      if (isAdmin && data.type === 'admin-request') {
-        handleAdminRequest(ws, data);
-        return;
-      }
-      
-      // Handle WebRTC signaling from clients
-      if (['offer', 'answer', 'ice-candidate'].includes(data.type)) {
-        if (data.to === 'server') {
-          // This message is intended for the server itself as a WebRTC peer
-          handleSignalingMessage(clientId, data);
-          return;
-        }
-      }
-      
-      // Forward to specific client
-      if (data.to && data.to !== 'ALL' && clients.has(data.to)) {
-        const targetClient = clients.get(data.to);
-        if (targetClient.ws.readyState === WebSocket.OPEN) {
-          // Format depends on client type
-          if (targetClient.info.isUnityClient && !isRawProtocol) {
-            // Convert to Unity protocol format
-            const unityMessage = formatMessageForUnity(data);
-            targetClient.ws.send(unityMessage);
-          } else {
-            targetClient.ws.send(JSON.stringify({ from: clientId, ...data }));
-          }
-        }
-      }
-      
-      // Broadcast
-      if (data.broadcast || data.to === 'ALL') {
-        clients.forEach((client, id) => {
-          if (id !== clientId && client.ws.readyState === WebSocket.OPEN) {
-            // Format depends on client type
-            if (client.info.isUnityClient && !isRawProtocol) {
-              // Convert to Unity protocol format
-              const unityMessage = formatMessageForUnity(data);
-              client.ws.send(unityMessage);
-            } else {
-              client.ws.send(JSON.stringify({ from: clientId, ...data }));
-            }
-          }
-        });
-      }
+      data = JSON.parse(msg);
     } catch (err) {
-      console.error('Error handling message:', err);
+      console.error('Invalid JSON', msg);
+      return;
     }
-  });
-  
-  // Client disconnection handler
-  ws.on('close', () => {
-    // Clean up client resources
-    serverWebRTC.closeConnection(clientId);
-    
-    // Notify admins if this wasn't an admin
-    if (!isAdmin && clients.has(clientId)) {
-      broadcastToAdmins({
-        type: 'admin-client-disconnected',
-        clientId
+ 
+    // Forward to specific client
+    if (data.to && clients.has(data.to)) {
+      clients.get(data.to).send(JSON.stringify({ from: clientId, ...data }));
+    }
+ 
+    // Broadcast
+    if (data.broadcast) {
+      clients.forEach((client, id) => {
+        if (id !== clientId && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ from: clientId, ...data }));
+        }
       });
     }
-    
-    // Remove from clients map
+  });
+ 
+  ws.on('close', () => {
     clients.delete(clientId);
-    
     console.log(`Client disconnected: ${clientId}`);
     console.log(`Total clients: ${clients.size}`);
   });
-  
-  // Error handler
-  ws.on('error', (err) => console.error(`WebSocket error for ${clientId}:`, err));
+ 
+  ws.on('error', (err) => console.error('WebSocket error:', err));
 });
-
-// Format a message for Unity clients using their protocol
-function formatMessageForUnity(data) {
-  let type = data.type.toUpperCase();
-  let message = data.message || '';
-  
-  // Handle special message types
-  if (type === 'OFFER') {
-    message = data.sdp || '';
-  } else if (type === 'ANSWER') {
-    message = data.sdp || '';
-  } else if (type === 'ICE-CANDIDATE') {
-    type = 'CANDIDATE';
-    message = JSON.stringify(data.candidate) || '{}';
-  }
-  
-  // Format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
-  const sender = data.from || 'server';
-  const receiver = data.to || 'ALL';
-  const connectionCount = '0';
-  const isVideoAudioSender = 'false';
-  
-  return `${type}|${sender}|${receiver}|${message}|${connectionCount}|${isVideoAudioSender}`;
-}
-
-// Handle WebRTC signaling messages
-async function handleSignalingMessage(clientId, data) {
-  if (!clients.has(clientId)) return;
-  
-  const client = clients.get(clientId);
-  
-  if (data.type === 'offer') {
-    // Client is sending an offer to the server
-    try {
-      await serverWebRTC.handleOffer(
-        clientId, 
-        data.sdp,
-        (answer) => {
-          if (client.ws.readyState === WebSocket.OPEN) {
-            if (client.info.isUnityClient) {
-              const msg = JSON.parse(answer);
-              const unityMsg = `ANSWER|server|${clientId}|${msg.sdp}|0|true`;
-              client.ws.send(unityMsg);
-            } else {
-              client.ws.send(answer);
-            }
-          }
-        }
-      );
-      
-      // Auto-start streaming for Unity clients
-      if (client.info.isUnityClient) {
-        // Get the first available video
-        const videos = videoManager.getVideos();
-        if (videos.length > 0) {
-          setTimeout(() => {
-            serverWebRTC.startStreaming(clientId, videos[0].id);
-            console.log(`Auto-starting stream for Unity client ${clientId}`);
-          }, 2000);
-        }
-      }
-    } catch (err) {
-      console.error(`Error handling offer from ${clientId}:`, err);
-    }
-  }
-}
-
-// Handle admin requests
-async function handleAdminRequest(ws, data) {
-  switch (data.action) {
-    case 'get-state':
-      // Send current state to admin
-      ws.send(JSON.stringify({
-        type: 'admin-state',
-        clients: Array.from(clients.values()).filter(c => !c.info.isAdmin).map(c => ({
-          id: c.info.id,
-          connectedAt: c.connectionTime,
-          status: c.status,
-          isUnityClient: c.info.isUnityClient
-        })),
-        videos: videoManager.getVideos()
-      }));
-      break;
-      
-    case 'start-stream':
-      // Start streaming a video to a client
-      if (!data.clientId || !data.videoId) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: 'Missing clientId or videoId'
-        }));
-        return;
-      }
-      
-      try {
-        const success = await serverWebRTC.startStreaming(data.clientId, data.videoId);
-        if (success) {
-          ws.send(JSON.stringify({
-            type: 'admin-stream-started',
-            clientId: data.clientId,
-            videoId: data.videoId
-          }));
-        } else {
-          ws.send(JSON.stringify({
-            type: 'admin-error',
-            message: 'Failed to start streaming'
-          }));
-        }
-      } catch (err) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: err.message
-        }));
-      }
-      break;
-      
-    case 'delete-video':
-      // Delete a video
-      if (!data.videoId) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: 'Missing videoId'
-        }));
-        return;
-      }
-      
-      try {
-        const success = videoManager.deleteVideo(data.videoId);
-        if (success) {
-          ws.send(JSON.stringify({
-            type: 'admin-video-deleted',
-            videoId: data.videoId
-          }));
-        } else {
-          ws.send(JSON.stringify({
-            type: 'admin-error',
-            message: 'Video not found'
-          }));
-        }
-      } catch (err) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: err.message
-        }));
-      }
-      break;
-  }
-}
-
-// Broadcast a message to all admin clients
-function broadcastToAdmins(message) {
-  clients.forEach((client, id) => {
-    if (client.info.isAdmin && client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(JSON.stringify(message));
-    }
-  });
-}
-
-// Start the server
+ 
 server.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  console.log(`Admin interface available at http://localhost:${port}/admin`);
-  console.log(`Client stream viewer available at http://localhost:${port}/client.html`);
 });
-
-// Clean up on server shutdown
-process.on('SIGINT', () => {
-  console.log('Shutting down server...');
-  serverWebRTC.closeAllConnections();
-  process.exit(0);
-});
+ 
