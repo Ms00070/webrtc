@@ -2,355 +2,272 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-
-// Express setup
+ 
+// Create Express app
 const app = express();
 const port = process.env.PORT || 3000;
+ 
+// Middleware for JSON parsing
+app.use(express.json());
+ 
+// Serve static files from the "public" directory
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Add CORS headers for WebRTC connections
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-  next();
-});
-
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// Map to store clients and peer connections
-const clients = new Map();
-const peerConnections = new Map();
-
-// Store local streams for each broadcasting client
-const localStreams = new Map();
-const videoSources = new Set();
-
-// Standard WebRTC configuration
-const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { 
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
-  ]
-};
-
-wss.on('connection', (ws) => {
-  const clientId = Date.now().toString(); // unique client ID
-  clients.set(clientId, ws);
-  console.log(`Client connected: ${clientId}`);
-  console.log(`Total clients: ${clients.size}`);
-
-  // Send welcome message with active clients and video sources
-  ws.send(JSON.stringify({ 
-    type: 'welcome', 
-    clientId, 
+ 
+// Add status endpoint for debugging
+app.get('/api/status', (req, res) => {
+  const status = {
     clients: Array.from(clients.keys()),
-    videoSources: Array.from(videoSources)
-  }));
-
-  ws.on('message', (msg) => {
-    let data;
+    videoSenders: Array.from(videoSenders.keys()),
+    pendingMessages: Object.fromEntries(
+      Array.from(pendingMessages.entries()).map(([key, messages]) => [
+        key,
+        {
+          count: messages.length,
+          types: messages.reduce((acc, msg) => {
+            const type = msg.split('|')[0];
+            acc[type] = (acc[type] || 0) + 1;
+            return acc;
+          }, {})
+        }
+      ])
+    )
+  };
+ 
+  res.json(status);
+});
+ 
+// Add endpoint for Unity to check if server is ready
+app.get('/api/ready', (req, res) => {
+  const videoSendersCount = videoSenders.size;
+  res.json({
+    ready: videoSendersCount > 0,
+    videoSenders: Array.from(videoSenders.keys()),
+    message: videoSendersCount > 0 ?
+      `Server ready with ${videoSendersCount} video senders` :
+      'Server running but no video senders connected yet'
+  });
+});
+ 
+// Create HTTP server
+const server = http.createServer(app);
+ 
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+ 
+// Store connected clients with their peer IDs
+const clients = new Map();
+ 
+// Store video senders for quick reconnection when new clients join
+const videoSenders = new Map();
+ 
+// Store pending offers and candidates for late-joining clients
+const pendingMessages = new Map();
+ 
+// Handle WebSocket connections
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+  let clientPeerId = null;
+ 
+  // Handle messages from clients
+  ws.on('message', (message) => {
+    const messageStr = message.toString();
+    console.log(`Received message: ${messageStr}`);
+   
     try {
-      data = JSON.parse(msg);
-      console.log(`Received message type: ${data.type} from: ${data.from || clientId}`);
+      // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
+      const parts = messageStr.split('|');
+      const type = parts[0];
+      const senderId = parts[1];
+      const receiverId = parts[2];
+      const msgContent = parts[3];
+      const connectionCount = parts[4] || '0';
+      const isVideoAudioSender = parts[5] || 'false';
+     
+      // Register client with its ID when it announces itself
+      if (type === 'NEWPEER') {
+        clientPeerId = senderId;
+        clients.set(senderId, ws);
+        console.log(`Registered client with ID: ${senderId}`);
+       
+        // Check if this is a video sender
+        const isVideoSender = isVideoAudioSender === 'true';
+        if (isVideoSender) {
+          console.log(`Client ${senderId} registered as video sender`);
+          videoSenders.set(senderId, { ws, timestamp: Date.now() });
+        }
+       
+        // Broadcast to all clients
+        broadcastMessage(messageStr, ws);
+       
+        // If this is a new client (not a video sender), inform them about existing video senders
+        if (!isVideoSender) {
+          console.log(`Sending existing video senders to new client ${senderId}`);
+          videoSenders.forEach((sender, senderPeerId) => {
+            if (sender.ws.readyState === WebSocket.OPEN) {
+              // Send NEWPEER message from each video sender to the new client
+              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Existing video sender|0|true`;
+              ws.send(senderAnnouncement);
+              console.log(`Notified new client ${senderId} about existing video sender ${senderPeerId}`);
+            }
+          });
+        }
+       
+        // Send any pending messages for this client
+        if (pendingMessages.has(senderId)) {
+          console.log(`Delivering ${pendingMessages.get(senderId).length} pending messages to ${senderId}`);
+          pendingMessages.get(senderId).forEach(pendingMsg => {
+            ws.send(pendingMsg);
+          });
+          pendingMessages.delete(senderId);
+        }
+      }
+      // Handle peer-to-peer messages
+      else if (receiverId && receiverId !== 'ALL') {
+        // Ensure message has complete format
+        let completeMessage = messageStr;
+        const parts = messageStr.split('|');
+        if (parts.length < 6) {
+          // Add missing parts with default values
+          while (parts.length < 4) {
+            parts.push(''); // Add empty strings for missing required parts
+          }
+          if (parts.length === 4) {
+            parts.push('0'); // Add default connection count
+          }
+          if (parts.length === 5) {
+            parts.push('false'); // Add default isVideoAudioSender flag
+          }
+          completeMessage = parts.join('|');
+        }
+       
+        // Send to specific client
+        const targetClient = clients.get(receiverId);
+        if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+          console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
+          targetClient.send(completeMessage);
+        } else {
+          console.log(`Target client ${receiverId} not found or not connected - storing message`);
+         
+          // Store important messages (OFFER and CANDIDATE) for clients who haven't connected yet
+          if (type === 'OFFER' || type === 'CANDIDATE') {
+            if (!pendingMessages.has(receiverId)) {
+              pendingMessages.set(receiverId, []);
+            }
+           
+            // Store the complete message
+            pendingMessages.get(receiverId).push(completeMessage);
+            console.log(`Stored ${type} message for ${receiverId} (total pending: ${pendingMessages.get(receiverId).length})`);
+           
+            // For Unity clients, limit the number of stored messages to prevent memory issues
+            if (pendingMessages.get(receiverId).length > 100) {
+              // Keep important messages like the most recent OFFER
+              const offers = pendingMessages.get(receiverId).filter(msg => msg.startsWith('OFFER'));
+              const candidates = pendingMessages.get(receiverId).filter(msg => msg.startsWith('CANDIDATE')).slice(-20);
+             
+              // Replace with filtered messages (most recent offer and a reasonable number of candidates)
+              const filteredMessages = [...offers.slice(-1), ...candidates];
+              pendingMessages.set(receiverId, filteredMessages);
+              console.log(`Trimmed pending messages for ${receiverId} to ${filteredMessages.length} messages`);
+            }
+          }
+        }
+      }
+      // Handle broadcast messages
+      else if (receiverId === 'ALL') {
+        // Broadcast to all clients except sender
+        broadcastMessage(messageStr, ws);
+      }
     } catch (err) {
-      console.error('Invalid JSON', msg);
-      return;
+      console.error('Error processing message:', err);
     }
-
-    // Add sender ID if not present
-    if (!data.from) {
-      data.from = clientId;
+  });
+ 
+  // Handle client disconnections
+  ws.on('close', () => {
+    if (clientPeerId) {
+      console.log(`Client ${clientPeerId} disconnected`);
+     
+      // Remove from clients map
+      clients.delete(clientPeerId);
+     
+      // If it was a video sender, remove from video senders map
+      if (videoSenders.has(clientPeerId)) {
+        console.log(`Video sender ${clientPeerId} disconnected`);
+        videoSenders.delete(clientPeerId);
+      }
+     
+      // Clear any pending messages for this client
+      if (pendingMessages.has(clientPeerId)) {
+        console.log(`Clearing ${pendingMessages.get(clientPeerId).length} pending messages for ${clientPeerId}`);
+        pendingMessages.delete(clientPeerId);
+      }
+     
+      // Notify other clients about disconnection
+      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
+      broadcastMessage(disconnectMsg, null);
+    } else {
+      console.log('Unknown client disconnected');
     }
-
-    // Handle specific message types
-    switch (data.type) {
-      case 'NEWPEER':
-        // Track this as a potential video source
-        console.log(`New peer connected: ${data.from}`);
-        break;
-
-      case 'sender-ready':
-        // Client is ready to send video
-        console.log(`${data.from} is ready to send video`);
-        videoSources.add(data.from);
-        
-        // Broadcast to all clients that a video sender is available
-        clients.forEach((client, id) => {
-          if (id !== data.from && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-              type: 'sender-ready',
-              from: data.from,
-              to: id
-            }));
+  });
+ 
+  // Handle errors
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
+ 
+// Function to broadcast a message to all clients except the sender
+function broadcastMessage(message, excludeClient) {
+  // Ensure message has all 6 parts required by SimpleWebRTC
+  const parts = message.split('|');
+  if (parts.length < 6) {
+    // Add missing parts with default values
+    while (parts.length < 4) {
+      parts.push(''); // Add empty strings for missing required parts
+    }
+    if (parts.length === 4) {
+      parts.push('0'); // Add default connection count
+    }
+    if (parts.length === 5) {
+      parts.push('false'); // Add default isVideoAudioSender flag
+    }
+    message = parts.join('|');
+  }
+ 
+  wss.clients.forEach((client) => {
+    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+ 
+// Send periodic reminders about video senders to ensure Unity clients stay connected
+function sendVideoSenderReminders() {
+  // Get all video senders and Unity clients
+  const unityClients = new Map([...clients.entries()].filter(([id]) => id.includes('Unity')));
+ 
+  if (videoSenders.size > 0 && unityClients.size > 0) {
+    console.log(`Sending video sender reminders to ${unityClients.size} Unity clients`);
+   
+    videoSenders.forEach((sender, senderPeerId) => {
+      if (sender.ws.readyState === WebSocket.OPEN) {
+        unityClients.forEach((unityClient, unityClientId) => {
+          if (unityClient.readyState === WebSocket.OPEN) {
+            // Send a NEWPEER reminder
+            const reminderMsg = `NEWPEER|${senderPeerId}|${unityClientId}|Video sender reminder|0|true`;
+            unityClient.send(reminderMsg);
+            console.log(`Sent reminder about ${senderPeerId} to Unity client ${unityClientId}`);
           }
         });
-        break;
-
-      case 'video-request':
-        // Client is requesting video from this server
-        console.log(`Video requested by ${data.from}, creating offer`);
-        handleVideoRequest(data);
-        break;
-
-      case 'offer':
-        // Handle incoming WebRTC offer
-        console.log(`Received offer from ${data.from} to ${data.to}`);
-        if (data.to && clients.has(data.to)) {
-          clients.get(data.to).send(JSON.stringify(data));
-        }
-        break;
-
-      case 'answer':
-        // Handle incoming WebRTC answer
-        console.log(`Received answer from ${data.from} to ${data.to}`);
-        if (data.to && clients.has(data.to)) {
-          clients.get(data.to).send(JSON.stringify(data));
-        }
-        
-        // If this server is the recipient, set remote description
-        if (data.to === clientId && peerConnections.has(data.from)) {
-          const pc = peerConnections.get(data.from);
-          const desc = { type: 'answer', sdp: data.sdp };
-          pc.setRemoteDescription(desc)
-            .then(() => console.log(`Set remote description from ${data.from}`))
-            .catch(err => console.error("Error setting remote description:", err));
-        }
-        break;
-
-      case 'ice-candidate':
-        // Handle ICE candidate exchange
-        console.log(`Received ICE candidate from ${data.from} to ${data.to}`);
-        if (data.to && clients.has(data.to)) {
-          clients.get(data.to).send(JSON.stringify(data));
-        }
-        
-        // If this server is the recipient, add ICE candidate
-        if (data.to === clientId && peerConnections.has(data.from)) {
-          const pc = peerConnections.get(data.from);
-          pc.addIceCandidate(data.candidate)
-            .catch(e => console.error('Error adding received ice candidate', e));
-        }
-        break;
-
-      default:
-        // Forward to specific client
-        if (data.to && clients.has(data.to)) {
-          clients.get(data.to).send(JSON.stringify(data));
-        }
-        
-        // Broadcast if requested
-        if (data.broadcast) {
-          clients.forEach((client, id) => {
-            if (id !== data.from && client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify(data));
-            }
-          });
-        }
-    }
-  });
-
-  ws.on('close', () => {
-    // Clean up resources for this client
-    cleanupClient(clientId);
-    
-    console.log(`Client disconnected: ${clientId}`);
-    console.log(`Total clients: ${clients.size}`);
-  });
-
-  ws.on('error', (err) => console.error('WebSocket error:', err));
-});
-
-// Function to handle video requests
-function handleVideoRequest(data) {
-  // Verify the request is valid
-  if (!data.from) return;
-  
-  // Get the requesting client's websocket
-  const requestingClient = clients.get(data.from);
-  if (!requestingClient || requestingClient.readyState !== WebSocket.OPEN) return;
-  
-  // Check if we have a stream to send
-  if (!hasLocalStream()) {
-    console.log("No local stream available to send");
-    setupDummyStream();
-  }
-  
-  // Create a new peer connection for this client if needed
-  if (!peerConnections.has(data.from)) {
-    console.log(`Creating new peer connection for ${data.from}`);
-    const peerConnection = new RTCPeerConnection(rtcConfig);
-    peerConnections.set(data.from, peerConnection);
-    
-    // Add local media tracks to the connection
-    const stream = getLocalStream();
-    if (stream) {
-      stream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, stream);
-        console.log(`Added ${track.kind} track to peer connection`);
-      });
-    }
-    
-    // Handle ICE candidates
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log(`Sending ICE candidate to ${data.from}`);
-        requestingClient.send(JSON.stringify({
-          type: 'ice-candidate',
-          from: clientId,
-          to: data.from,
-          candidate: event.candidate
-        }));
       }
-    };
-    
-    // Connection state monitoring
-    peerConnection.onconnectionstatechange = (event) => {
-      console.log(`Connection state for ${data.from}: ${peerConnection.connectionState}`);
-      if (peerConnection.connectionState === 'disconnected' || 
-          peerConnection.connectionState === 'failed') {
-        console.log(`Cleaning up failed connection to ${data.from}`);
-        cleanupPeerConnection(data.from);
-      }
-    };
-    
-    // Create and send the offer
-    peerConnection.createOffer()
-      .then(offer => {
-        console.log(`Setting local description for ${data.from}`);
-        return peerConnection.setLocalDescription(offer);
-      })
-      .then(() => {
-        console.log(`Sending offer to ${data.from}`);
-        requestingClient.send(JSON.stringify({
-          type: 'offer',
-          from: clientId,
-          to: data.from,
-          sdp: peerConnection.localDescription.sdp
-        }));
-      })
-      .catch(err => console.error("Error creating offer:", err));
+    });
   }
 }
-
-// Function to check if we have a local stream
-function hasLocalStream() {
-  return localStreams.has(clientId) && localStreams.get(clientId).getTracks().length > 0;
-}
-
-// Function to get the local stream, creating it if needed
-function getLocalStream() {
-  if (hasLocalStream()) {
-    return localStreams.get(clientId);
-  }
-  return null;
-}
-
-// Function to setup a dummy video stream if needed
-function setupDummyStream() {
-  try {
-    // Check if we're in a browser environment
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
-      console.log("Video loaded and playing");
-      navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-        .then(stream => {
-          localStreams.set(clientId, stream);
-          videoSources.add(clientId);
-          console.log("Captured stream from video");
-          
-          // Broadcast that we're ready to send video
-          clients.forEach((client, id) => {
-            if (id !== clientId && client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({
-                type: 'sender-ready',
-                from: clientId,
-                to: id
-              }));
-            }
-          });
-          console.log("Broadcasted sender-ready message");
-        })
-        .catch(err => {
-          console.error("Error getting media stream:", err);
-          setupCanvasStream(); // Fallback to canvas
-        });
-    } else {
-      console.log("No media devices available, using canvas stream");
-      setupCanvasStream();
-    }
-  } catch (err) {
-    console.error("Error setting up stream:", err);
-  }
-}
-
-// Setup a canvas stream as fallback
-function setupCanvasStream() {
-  console.log("Creating canvas video stream");
-  
-  // This would need proper implementation in a browser environment
-  // For now, just log that we would create one
-  console.log("Canvas stream setup would happen here in browser");
-}
-
-// Clean up resources when a client disconnects
-function cleanupClient(clientId) {
-  // Remove from clients map
-  clients.delete(clientId);
-  
-  // Clean up any peer connections
-  cleanupPeerConnection(clientId);
-  
-  // Remove from video sources
-  videoSources.delete(clientId);
-  
-  // Clean up local stream if this was a broadcaster
-  if (localStreams.has(clientId)) {
-    const stream = localStreams.get(clientId);
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-    }
-    localStreams.delete(clientId);
-  }
-  
-  // Notify other clients that this source is gone
-  clients.forEach((client, id) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({
-        type: 'peer-disconnected',
-        from: clientId,
-        to: id
-      }));
-    }
-  });
-}
-
-// Clean up a specific peer connection
-function cleanupPeerConnection(peerId) {
-  if (peerConnections.has(peerId)) {
-    const pc = peerConnections.get(peerId);
-    if (pc) {
-      pc.onicecandidate = null;
-      pc.ontrack = null;
-      pc.onconnectionstatechange = null;
-      
-      // Close the connection
-      pc.close();
-    }
-    peerConnections.delete(peerId);
-  }
-}
-
-// If in browser environment, setup the stream immediately
-if (typeof window !== 'undefined') {
-  setupDummyStream();
-}
-
+ 
+// Set up periodic reminder (every 10 seconds)
+setInterval(sendVideoSenderReminders, 10000);
+ 
+// Start the server
 server.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-  console.log('WebRTC video streaming enabled');
+  console.log(`Server is running on port ${port}`);
 });
