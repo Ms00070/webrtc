@@ -24,7 +24,7 @@ const pendingIceCandidates = new Map();
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
-  let clientPeerId =;
+  let clientPeerId = null; // FIXED: Initialize clientPeerId to null
   
   // Handle messages from clients
   ws.on('message', (message) => {
