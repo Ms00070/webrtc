@@ -11,50 +11,16 @@
       font-family: monospace;
       background: #f9f9f9;
     }
-    
-    video {
-      max-width: 640px;
-      border: 1px solid #333;
-    }
-    
-    .container {
-      margin: 20px;
-    }
-    
-    .controls {
-      margin-top: 10px;
-      margin-bottom: 10px;
-    }
-    
-    button {
-      padding: 8px 16px;
-      background-color: #4CAF50;
-      color: white;
-      border: none;
-      cursor: pointer;
-      margin-right: 5px;
-    }
-    
-    button:hover {
-      background-color: #45a049;
-    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h2>Upload MP4 and Stream</h2>
-    <div class="controls">
-      <input type="file" id="fileInput" accept="video/mp4,video/webm">
-      <button id="startButton">Start Streaming</button>
-      <button id="announceButton">Announce Ready</button>
-    </div>
-    <video id="localVideo" autoplay controls playsinline muted></video>
-    <h3>Logs</h3>
-    <div id="log"></div>
-  </div>
+  <h2>Upload MP4 and Stream</h2>
+  <input type="file" id="fileInput" accept="video/mp4">
+  <video id="localVideo" autoplay controls playsinline muted></video>
+  <h3>Logs</h3>
+  <div id="log"></div>
  
   <script>
-    // Client-side JavaScript for WebRTC streaming
     function logOnScreen(msg) {
       const logDiv = document.getElementById("log");
       logDiv.innerHTML += msg + "<br>";
@@ -65,204 +31,67 @@
     const ws = new WebSocket("wss://webrtc-9gdy.onrender.com/");
     const peers = {};
     let localStream;
-    const clientId = "browser-" + Date.now();
-    const localVideo = document.getElementById('localVideo');
-    localVideo.dataset.clientId = clientId;
-    
-    document.getElementById('startButton').addEventListener('click', startStreaming);
-    document.getElementById('announceButton').addEventListener('click', announceReady);
-    document.getElementById('fileInput').addEventListener('change', handleFileSelect);
  
-    // Handle WebSocket connection
-    ws.onopen = () => {
-      logOnScreen("Connected to custom WSS server");
-      
-      // Announce ourselves as a peer
-      ws.send(JSON.stringify({
-        type: "NEWPEER",
-        from: clientId,
-        to: "ALL",
-        message: "New peer " + clientId
-      }));
-    };
-    
-    // Handle file selection
-    function handleFileSelect(event) {
-      const file = event.target.files[0];
-      if (!file) return;
-      
-      logOnScreen("Selected file: " + file.name);
-      
-      const url = URL.createObjectURL(file);
-      localVideo.src = url;
-      localVideo.onloadedmetadata = () => {
-        logOnScreen("Video loaded and ready to stream");
-      };
-    }
-    
-    // Start streaming the selected video
-    function startStreaming() {
-      if (!localVideo.src) {
-        logOnScreen("Please select a video file first");
-        return;
-      }
-      
-      localVideo.play();
-      
-      // Capture the video stream
-      try {
-        localStream = localVideo.captureStream();
-        logOnScreen("Captured stream from video");
-        
-        // Announce that we're ready to stream
-        announceReady();
-      } catch (e) {
-        logOnScreen("Error capturing stream: " + e.message);
-      }
-    }
-    
-    // Announce ready to stream
-    function announceReady() {
-      if (!localStream) {
-        logOnScreen("No stream to announce. Please start streaming first.");
-        return;
-      }
-      
-      ws.send(JSON.stringify({
-        type: "broadcast",
-        from: clientId,
-        broadcast: true,
-        message: "sender-ready"
-      }));
-      
-      logOnScreen("Broadcasted sender-ready message");
-    }
-    
-    // Create peer connection
-    function createPeerConnection(peerId) {
-      if (peers[peerId]) return peers[peerId];
-      
-      logOnScreen(`Creating peer connection for: ${peerId}`);
-      
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" }
-        ]
-      });
-      
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          ws.send(JSON.stringify({
-            type: "ice-candidate",
-            from: clientId,
-            to: peerId,
-            candidate: event.candidate
-          }));
-        }
-      };
-      
-      pc.onconnectionstatechange = () => {
-        logOnScreen(`Connection state with ${peerId}: ${pc.connectionState}`);
-      };
-      
-      // Store the peer connection
-      peers[peerId] = pc;
-      return pc;
-    }
-    
-    // Handle incoming messages
+    ws.onopen = () => logOnScreen("Connected to custom WSS server");
+ 
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
       logOnScreen("Received message: " + JSON.stringify(msg));
-      
-      // Handle answers to our offers
+ 
       if (msg.type === "answer" && peers[msg.from]) {
-        logOnScreen(`Received answer from ${msg.from}`);
         await peers[msg.from].setRemoteDescription({ type: "answer", sdp: msg.sdp });
+        logOnScreen(`Answer set from client ${msg.from}`);
       }
-      
-      // Handle ICE candidates
+ 
       if (msg.type === "ice-candidate" && peers[msg.from]) {
-        logOnScreen(`Received ICE candidate from ${msg.from}`);
         try {
           await peers[msg.from].addIceCandidate(msg.candidate);
-        } catch (e) {
-          logOnScreen(`Error adding ICE candidate: ${e.message}`);
+          logOnScreen(`ICE candidate added from client ${msg.from}`);
+        } catch(e) {
+          logOnScreen(`Error adding ICE candidate: ${e}`);
         }
       }
-      
-      // Handle offers from other peers
-      if (msg.type === "offer") {
-        logOnScreen(`Received offer from ${msg.from}`);
-        if (!localStream) {
-          logOnScreen("Cannot answer offer: no local stream available");
-          return;
+ 
+      if (msg.type === "request-offer" && msg.from && !peers[msg.from]) {
+        const pc = new RTCPeerConnection();
+        peers[msg.from] = pc;
+        logOnScreen(`Creating PeerConnection for client ${msg.from}`);
+ 
+        if (localStream) {
+          localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+          logOnScreen("Added local video tracks to PeerConnection");
         }
-        
-        // Create peer connection for the requester
-        const pc = createPeerConnection(msg.from);
-        
-        // Add all tracks from our local stream
-        localStream.getTracks().forEach(track => {
-          pc.addTrack(track, localStream);
-        });
-        
-        // Set the remote offer
-        await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-        
-        // Create and send answer
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        
-        ws.send(JSON.stringify({
-          type: "answer",
-          from: clientId,
-          to: msg.from,
-          sdp: answer.sdp
-        }));
-        
-        logOnScreen(`Sent answer to ${msg.from}`);
-      }
-      
-      // Handle special request for video
-      if (msg.type === "MESSAGE" && msg.message === "request-video") {
-        logOnScreen(`Video request received from ${msg.from}, establishing connection...`);
-        
-        // Only respond if we have a video stream
-        if (!localStream) {
-          logOnScreen("No local stream available to send");
-          return;
+ 
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            ws.send(JSON.stringify({ type: "ice-candidate", to: msg.from, candidate: e.candidate }));
+            logOnScreen(`Sent ICE candidate to client ${msg.from}`);
+          }
         }
-        
-        // Create a peer connection for this client if not exists
-        const pc = createPeerConnection(msg.from);
-        
-        // Add local stream to the peer connection
-        localStream.getTracks().forEach(track => {
-          pc.addTrack(track, localStream);
-        });
-        
-        // Create and send an offer
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          
-          ws.send(JSON.stringify({
-            type: "offer",
-            from: clientId,
-            to: msg.from,
-            sdp: offer.sdp
-          }));
-          
-          logOnScreen(`Sent offer to ${msg.from}`);
-        } catch (e) {
-          logOnScreen(`Error creating offer: ${e.message}`);
-        }
+ 
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: "offer", to: msg.from, sdp: offer.sdp }));
+        logOnScreen(`Sent offer to client ${msg.from}`);
       }
     };
-    
-    ws.onerror = (error) => {
-      logOnScreen("WebSocket error: " + error);
-    };
-    
-    ws
+ 
+    document.getElementById("fileInput").addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+ 
+      const video = document.getElementById("localVideo");
+      video.src = URL.createObjectURL(file);
+      await video.play();
+      logOnScreen("Video loaded and playing");
+ 
+      localStream = video.captureStream();
+      logOnScreen("Captured stream from video");
+ 
+      ws.send(JSON.stringify({ type: "broadcast", broadcast: true, message: "sender-ready" }));
+      logOnScreen("Broadcasted sender-ready message");
+    });
+  </script>
+</body>
+</html>
+ 
