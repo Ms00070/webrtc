@@ -3,10 +3,8 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
-
-// Import custom modules
-const ServerWebRTC = require('./serverWebRTC');
-const VideoManager = require('./videoManager');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
 
 // Express setup
 const app = express();
@@ -23,47 +21,148 @@ const wss = new WebSocket.Server({
   path: '/' 
 });
 
-// Initialize our modules
-const videoManager = new VideoManager();
-const serverWebRTC = new ServerWebRTC();
+// Configure storage for video uploads
+const videosDir = path.join(__dirname, 'videos');
+if (!fs.existsSync(videosDir)) {
+  fs.mkdirSync(videosDir);
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, videosDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+  }
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video files are allowed'));
+    }
+  },
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB limit
+  }
+});
+
+// Store available videos
+const videos = new Map();
+
+// Load existing videos
+function loadVideos() {
+  if (!fs.existsSync(videosDir)) return;
+  
+  const files = fs.readdirSync(videosDir);
+  files.filter(file => {
+    const ext = path.extname(file).toLowerCase();
+    return ['.mp4', '.webm', '.ogg'].includes(ext);
+  }).forEach(file => {
+    const videoId = uuidv4();
+    const videoPath = path.join(videosDir, file);
+    const stats = fs.statSync(videoPath);
+    
+    videos.set(videoId, {
+      id: videoId,
+      name: file,
+      path: videoPath,
+      type: `video/${path.extname(file).substring(1)}`,
+      size: stats.size,
+      created: stats.birthtime
+    });
+  });
+  
+  console.log(`Loaded ${videos.size} videos from disk`);
+}
+
+loadVideos();
 
 // Map to store client connections
 const clients = new Map(); // clientId -> { ws, info, connectionTime }
 
 // Configure routes for video API
 app.get('/api/videos', (req, res) => {
-  res.json(videoManager.getVideos());
+  res.json(Array.from(videos.values()).map(video => ({
+    id: video.id,
+    name: video.name,
+    type: video.type,
+    size: video.size,
+    created: video.created
+  })));
 });
 
-app.post('/api/videos', videoManager.getUploadMiddleware().single('video'), (req, res) => {
+app.post('/api/videos', upload.single('video'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No video file uploaded' });
   }
   
-  const video = videoManager.addVideo(req.file);
+  const videoId = uuidv4();
+  const videoPath = path.join(videosDir, req.file.filename);
+  const stats = fs.statSync(videoPath);
+  
+  const videoData = {
+    id: videoId,
+    name: req.file.originalname,
+    path: videoPath,
+    type: req.file.mimetype,
+    size: stats.size,
+    created: new Date()
+  };
+  
+  videos.set(videoId, videoData);
+  console.log(`Added new video: ${req.file.originalname} (${videoId})`);
   
   // Notify admin clients of new video
   broadcastToAdmins({
     type: 'admin-video-added',
-    video
+    video: {
+      id: videoId,
+      name: req.file.originalname,
+      type: req.file.mimetype,
+      size: stats.size,
+      created: videoData.created
+    }
   });
   
-  res.status(201).json(video);
+  res.status(201).json({
+    id: videoId,
+    name: req.file.originalname,
+    type: req.file.mimetype,
+    size: stats.size,
+    created: videoData.created
+  });
 });
 
 app.delete('/api/videos/:id', (req, res) => {
-  const success = videoManager.deleteVideo(req.params.id);
+  const videoId = req.params.id;
   
-  if (success) {
+  if (!videos.has(videoId)) {
+    return res.status(404).json({ error: 'Video not found' });
+  }
+  
+  const video = videos.get(videoId);
+  
+  try {
+    fs.unlinkSync(video.path);
+    videos.delete(videoId);
+    console.log(`Deleted video: ${video.name} (${videoId})`);
+    
     // Notify admin clients of deleted video
     broadcastToAdmins({
       type: 'admin-video-deleted',
-      videoId: req.params.id
+      videoId
     });
     
     res.status(204).end();
-  } else {
-    res.status(404).json({ error: 'Video not found' });
+  } catch (err) {
+    console.error(`Error deleting video ${videoId}:`, err);
+    res.status(500).json({ error: 'Failed to delete video' });
   }
 });
 
@@ -204,15 +303,6 @@ wss.on('connection', (ws, req) => {
         return;
       }
       
-      // Handle WebRTC signaling from clients
-      if (['offer', 'answer', 'ice-candidate'].includes(data.type)) {
-        if (data.to === 'server') {
-          // This message is intended for the server itself as a WebRTC peer
-          handleSignalingMessage(clientId, data);
-          return;
-        }
-      }
-      
       // Forward to specific client
       if (data.to && data.to !== 'ALL' && clients.has(data.to)) {
         const targetClient = clients.get(data.to);
@@ -250,9 +340,6 @@ wss.on('connection', (ws, req) => {
   
   // Client disconnection handler
   ws.on('close', () => {
-    // Clean up client resources
-    serverWebRTC.closeConnection(clientId);
-    
     // Notify admins if this wasn't an admin
     if (!isAdmin && clients.has(clientId)) {
       broadcastToAdmins({
@@ -296,48 +383,6 @@ function formatMessageForUnity(data) {
   return `${type}|${sender}|${receiver}|${message}|${connectionCount}|${isVideoAudioSender}`;
 }
 
-// Handle WebRTC signaling messages
-async function handleSignalingMessage(clientId, data) {
-  if (!clients.has(clientId)) return;
-  
-  const client = clients.get(clientId);
-  
-  if (data.type === 'offer') {
-    // Client is sending an offer to the server
-    try {
-      await serverWebRTC.handleOffer(
-        clientId, 
-        data.sdp,
-        (answer) => {
-          if (client.ws.readyState === WebSocket.OPEN) {
-            if (client.info.isUnityClient) {
-              const msg = JSON.parse(answer);
-              const unityMsg = `ANSWER|server|${clientId}|${msg.sdp}|0|true`;
-              client.ws.send(unityMsg);
-            } else {
-              client.ws.send(answer);
-            }
-          }
-        }
-      );
-      
-      // Auto-start streaming for Unity clients
-      if (client.info.isUnityClient) {
-        // Get the first available video
-        const videos = videoManager.getVideos();
-        if (videos.length > 0) {
-          setTimeout(() => {
-            serverWebRTC.startStreaming(clientId, videos[0].id);
-            console.log(`Auto-starting stream for Unity client ${clientId}`);
-          }, 2000);
-        }
-      }
-    } catch (err) {
-      console.error(`Error handling offer from ${clientId}:`, err);
-    }
-  }
-}
-
 // Handle admin requests
 async function handleAdminRequest(ws, data) {
   switch (data.action) {
@@ -351,40 +396,14 @@ async function handleAdminRequest(ws, data) {
           status: c.status,
           isUnityClient: c.info.isUnityClient
         })),
-        videos: videoManager.getVideos()
+        videos: Array.from(videos.values()).map(v => ({
+          id: v.id,
+          name: v.name,
+          type: v.type,
+          size: v.size,
+          created: v.created
+        }))
       }));
-      break;
-      
-    case 'start-stream':
-      // Start streaming a video to a client
-      if (!data.clientId || !data.videoId) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: 'Missing clientId or videoId'
-        }));
-        return;
-      }
-      
-      try {
-        const success = await serverWebRTC.startStreaming(data.clientId, data.videoId);
-        if (success) {
-          ws.send(JSON.stringify({
-            type: 'admin-stream-started',
-            clientId: data.clientId,
-            videoId: data.videoId
-          }));
-        } else {
-          ws.send(JSON.stringify({
-            type: 'admin-error',
-            message: 'Failed to start streaming'
-          }));
-        }
-      } catch (err) {
-        ws.send(JSON.stringify({
-          type: 'admin-error',
-          message: err.message
-        }));
-      }
       break;
       
     case 'delete-video':
@@ -398,18 +417,22 @@ async function handleAdminRequest(ws, data) {
       }
       
       try {
-        const success = videoManager.deleteVideo(data.videoId);
-        if (success) {
-          ws.send(JSON.stringify({
-            type: 'admin-video-deleted',
-            videoId: data.videoId
-          }));
-        } else {
+        if (!videos.has(data.videoId)) {
           ws.send(JSON.stringify({
             type: 'admin-error',
             message: 'Video not found'
           }));
+          return;
         }
+        
+        const video = videos.get(data.videoId);
+        fs.unlinkSync(video.path);
+        videos.delete(data.videoId);
+        
+        ws.send(JSON.stringify({
+          type: 'admin-video-deleted',
+          videoId: data.videoId
+        }));
       } catch (err) {
         ws.send(JSON.stringify({
           type: 'admin-error',
@@ -433,12 +456,11 @@ function broadcastToAdmins(message) {
 server.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Admin interface available at http://localhost:${port}/admin`);
-  console.log(`Client stream viewer available at http://localhost:${port}/client.html`);
+  console.log(`Client viewer available at http://localhost:${port}/client.html`);
 });
 
 // Clean up on server shutdown
 process.on('SIGINT', () => {
   console.log('Shutting down server...');
-  serverWebRTC.closeAllConnections();
   process.exit(0);
 });
