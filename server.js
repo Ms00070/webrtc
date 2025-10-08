@@ -66,7 +66,7 @@ const pendingMessages = new Map();
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
-  let clientPeerId = null;
+  let clientPeerId =;
   
   // Handle messages from clients
   ws.on('message', (message) => {
@@ -94,20 +94,45 @@ wss.on('connection', (ws) => {
         if (isVideoSender) {
           console.log(`Client ${senderId} registered as video sender`);
           videoSenders.set(senderId, { ws, timestamp: Date.now() });
+          
+          // IMPROVEMENT 1: Immediately notify ALL existing Unity clients about this new video sender
+          clients.forEach((clientWs, clientId) => {
+            if (clientId !== senderId && clientId.includes('Unity')) {
+              const senderAnnouncement = `NEWPEER|${senderId}|${clientId}|New video sender available|0|true`;
+              clientWs.send(senderAnnouncement);
+              console.log(`Notified Unity client ${clientId} about new video sender ${senderId}`);
+              
+              // Send a follow-up NEWPEERACK to reinforce the connection
+              setTimeout(() => {
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  const ackMessage = `NEWPEERACK|${senderId}|${clientId}|Connect to video sender|0|true`;
+                  clientWs.send(ackMessage);
+                }
+              }, 300);
+            }
+          });
         }
         
         // Broadcast to all clients
         broadcastMessage(messageStr, ws);
         
-        // If this is a new client (not a video sender), inform them about existing video senders
-        if (!isVideoSender) {
-          console.log(`Sending existing video senders to new client ${senderId}`);
+        // IMPROVEMENT 2: If this is a Unity client, immediately notify it about ALL existing video senders
+        if (senderId.includes('Unity')) {
+          console.log(`Unity client ${senderId} connected - sending all video senders`);
           videoSenders.forEach((sender, senderPeerId) => {
             if (sender.ws.readyState === WebSocket.OPEN) {
               // Send NEWPEER message from each video sender to the new client
-              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Existing video sender|0|true`;
+              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Available video sender|0|true`;
               ws.send(senderAnnouncement);
-              console.log(`Notified new client ${senderId} about existing video sender ${senderPeerId}`);
+              console.log(`Notified new Unity client ${senderId} about existing video sender ${senderPeerId}`);
+              
+              // IMPROVEMENT 3: Send a follow-up NEWPEERACK to reinforce the connection
+              setTimeout(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  const ackMessage = `NEWPEERACK|${senderPeerId}|${senderId}|Connect to video sender|0|true`;
+                  ws.send(ackMessage);
+                }
+              }, 500);
             }
           });
         }
@@ -253,10 +278,19 @@ function sendVideoSenderReminders() {
       if (sender.ws.readyState === WebSocket.OPEN) {
         unityClients.forEach((unityClient, unityClientId) => {
           if (unityClient.readyState === WebSocket.OPEN) {
-            // Send a NEWPEER reminder
+            // IMPROVEMENT 4: Send both NEWPEER and NEWPEERACK reminders
             const reminderMsg = `NEWPEER|${senderPeerId}|${unityClientId}|Video sender reminder|0|true`;
             unityClient.send(reminderMsg);
-            console.log(`Sent reminder about ${senderPeerId} to Unity client ${unityClientId}`);
+            
+            // IMPROVEMENT 5: Also send an offer reminder periodically
+            setTimeout(() => {
+              if (unityClient.readyState === WebSocket.OPEN) {
+                const ackMsg = `NEWPEERACK|${senderPeerId}|${unityClientId}|Please connect to video sender|0|true`;
+                unityClient.send(ackMsg);
+              }
+            }, 300);
+            
+            console.log(`Sent reminders about ${senderPeerId} to Unity client ${unityClientId}`);
           }
         });
       }
@@ -264,8 +298,8 @@ function sendVideoSenderReminders() {
   }
 }
 
-// Set up periodic reminder (every 10 seconds)
-setInterval(sendVideoSenderReminders, 10000);
+// IMPROVEMENT 6: Send reminders more frequently (every 5 seconds instead of 10)
+setInterval(sendVideoSenderReminders, 5000);
 
 // Start the server
 server.listen(port, () => {
