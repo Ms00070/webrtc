@@ -3,189 +3,180 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 
-// Create Express app
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Serve static files from the "public" directory
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Create HTTP server
+// Initialize server
 const server = http.createServer(app);
 
-// Create WebSocket server
+// Serve static files from the 'public' directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve index.html at root
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Set up WebSocket server
 const wss = new WebSocket.Server({ server });
 
-// Store connected clients with their peer IDs
-const clients = new Map();
-// Map to store pending ICE candidates until remote description is set
-const pendingIceCandidates = new Map();
+// Track connected clients
+const clients = new Set();
+
+// Map to store clients by their IDs
+const clientsById = new Map();
+
+// Map to store pending ICE candidates until after ANSWER is processed
+const pendingCandidates = new Map();
+
+// Assign a client ID on connection
+let nextClientId = 1;
+
+// Initialize clientPeerId to null (FIXED)
+let clientPeerId = null;
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
-  let clientPeerId = null; // FIXED: Initialize clientPeerId to null
+  
+  // Add client to tracked clients
+  clients.add(ws);
+  
+  // Generate a unique ID for this client
+  const clientId = Date.now();
+  clientsById.set(ws, clientId);
+  
+  // Send welcome message with client ID
+  ws.send(JSON.stringify({ type: 'welcome', clientId, clients: Array.from(clients).map(c => clientsById.get(c)) }));
   
   // Handle messages from clients
   ws.on('message', (message) => {
-    const messageStr = message.toString();
-    console.log(`Received message: ${messageStr}`);
+    console.log(`Received: ${message}`);
     
-    try {
-      // Check if message is Unity format (TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER)
-      if (messageStr.includes('|')) {
-        // Parse message in Unity format
-        const parts = messageStr.split('|');
-        const type = parts[0];
-        const senderId = parts[1];
-        const receiverId = parts[2];
-        const msgContent = parts[3];
-        const connectionCount = parts[4] || '0';
-        const isVideoAudioSender = parts[5] || 'false';
-        
-        // Store ICE candidates if they arrive before ANSWER is processed
-        if (type === 'CANDIDATE') {
-          // If this is a candidate and we don't have a queue for this sender yet, create one
-          if (!pendingIceCandidates.has(senderId)) {
-            pendingIceCandidates.set(senderId, []);
+    // Check if the message is in Unity WebRTC protocol format (pipe-delimited)
+    const messageStr = message.toString();
+    
+    if (messageStr.includes('|')) {
+      // Unity-style message: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTIONCOUNT|ISVIDEOAUDIOSENDER
+      const parts = messageStr.split('|');
+      const type = parts[0];
+      const senderId = parts[1];
+      const receiverId = parts[2];
+      const content = parts[3];
+      
+      // FIXED: Store the client's peer ID for later use in CANDIDATE messages
+      if (type === 'NEWPEER') {
+        clientPeerId = senderId;
+      }
+
+      if (type === 'CANDIDATE') {
+        try {
+          const candidate = JSON.parse(content);
+          
+          // Check if candidate is empty or invalid
+          if (!candidate || Object.keys(candidate).length === 0 || 
+              (!candidate.sdpMid && candidate.sdpMLineIndex === undefined)) {
+            console.log('Skipping invalid ICE candidate:', content);
+            return;
           }
           
-          // Only queue candidates if they are from Unity (browser handles its own queueing)
-          if (senderId.startsWith('UnityClient')) {
-            console.log(`Queueing ICE candidate from ${senderId} for ${receiverId}`);
-            pendingIceCandidates.get(senderId).push(messageStr);
-            return; // Don't forward yet
-          }
-        }
-        
-        // When we get an ANSWER, we can process the pending candidates
-        if (type === 'ANSWER') {
-          // Forward the answer first
-          if (receiverId && clients.has(receiverId)) {
-            const targetClient = clients.get(receiverId);
-            if (targetClient.readyState === WebSocket.OPEN) {
-              targetClient.send(messageStr);
-              console.log(`Sent ANSWER from ${senderId} to ${receiverId}`);
+          // If this is targeting a specific client and we haven't processed an ANSWER yet,
+          // buffer the candidate
+          if (receiverId !== 'ALL' && !receiverId.includes('ALL')) {
+            if (!pendingCandidates.has(receiverId)) {
+              pendingCandidates.set(receiverId, []);
             }
+            
+            const targetClientCandidates = pendingCandidates.get(receiverId);
+            targetClientCandidates.push({ senderId, message: messageStr });
+            console.log(`Stored ICE candidate from ${senderId} for ${receiverId}`);
           }
-          
-          // Then send any pending candidates after a short delay
-          setTimeout(() => {
-            if (pendingIceCandidates.has(senderId)) {
-              const candidates = pendingIceCandidates.get(senderId);
-              console.log(`Sending ${candidates.length} queued ICE candidates from ${senderId}`);
-              
-              candidates.forEach(candidateMsg => {
-                const parts = candidateMsg.split('|');
-                const receiverId = parts[2];
-                
-                if (receiverId && clients.has(receiverId)) {
-                  const targetClient = clients.get(receiverId);
-                  if (targetClient.readyState === WebSocket.OPEN) {
-                    targetClient.send(candidateMsg);
-                  }
-                }
-              });
-              
-              // Clear the queue
-              pendingIceCandidates.delete(senderId);
-            }
-          }, 500); // Wait 500ms to ensure the ANSWER is processed
-          
-          return; // We've already forwarded the ANSWER
-        }
-        
-        // Register client with its ID when it announces itself
-        if (type === 'NEWPEER') {
-          clientPeerId = senderId;
-          clients.set(senderId, ws);
-          console.log(`Registered client with ID: ${senderId}`);
-          
-          // Broadcast to all clients
-          broadcastMessage(messageStr, ws);
-        } 
-        // Handle peer-to-peer messages
-        else if (receiverId && receiverId !== 'ALL') {
-          // Ensure message has complete format
-          let completeMessage = messageStr;
-          const messageParts = messageStr.split('|');
-          if (messageParts.length < 6) {
-            // Add missing parts with default values
-            while (messageParts.length < 6) {
-              messageParts.push(messageParts.length === 4 ? '0' : messageParts.length === 5 ? 'false' : '');
-            }
-            completeMessage = messageParts.join('|');
-          }
-          
-          // Send to specific client
-          const targetClient = clients.get(receiverId);
-          if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-            console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
-            targetClient.send(completeMessage);
-          } else {
-            console.log(`Target client ${receiverId} not found or not connected`);
-          }
-        }
-        // Handle broadcast messages
-        else if (receiverId === 'ALL') {
-          // Broadcast to all clients except sender
-          broadcastMessage(messageStr, ws);
-        }
-      } else {
-        // Handle JSON format messages (browser clients)
-        const data = JSON.parse(messageStr);
-        
-        // If this is from a browser client, store the clientId
-        if (data.type === 'welcome' || data.type === 'NEWPEER') {
-          clientPeerId = data.from || data.clientId;
-          clients.set(clientPeerId, ws);
-          console.log(`Registered JSON client with ID: ${clientPeerId}`);
-        }
-        
-        // Forward to specific client
-        if (data.to && clients.has(data.to)) {
-          // Check if target is Unity client (needs conversion)
-          const targetClient = clients.get(data.to);
-          if (targetClient.readyState === WebSocket.OPEN) {
-            targetClient.send(JSON.stringify({ from: clientPeerId, ...data }));
-          }
-        }
-        
-        // Handle broadcast
-        if (data.broadcast) {
-          clients.forEach((client, id) => {
-            if (id !== clientPeerId && client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({ from: clientPeerId, ...data }));
-            }
-          });
+        } catch (err) {
+          console.error('Error processing ICE candidate:', err);
         }
       }
-    } catch (err) {
-      console.error('Error processing message:', err);
+      
+      // For ANSWER messages, we need to process any stored ICE candidates
+      if (type === 'ANSWER') {
+        // Forward the ANSWER first
+        broadcastMessage(messageStr, ws);
+        
+        // Then send any pending ICE candidates
+        if (pendingCandidates.has(senderId)) {
+          const candidatesToSend = pendingCandidates.get(senderId);
+          for (const candidate of candidatesToSend) {
+            console.log(`Sending stored ICE candidate from ${candidate.senderId} to ${senderId}`);
+            broadcastMessage(candidate.message, ws);
+          }
+          // Clear the pending candidates
+          pendingCandidates.delete(senderId);
+        }
+        
+        // Don't broadcast this message again below, as we've already handled it
+        return;
+      }
+      
+      // Forward the message to all clients or specific client
+      broadcastMessage(messageStr, ws);
+    } else {
+      // Standard JSON message
+      try {
+        const msg = JSON.parse(messageStr);
+        
+        // Handle different message types
+        if (msg.type === 'offer') {
+          // Handle offer - find target client and forward
+          const targetWs = findClientById(msg.to);
+          if (targetWs) {
+            targetWs.send(JSON.stringify({
+              type: 'offer',
+              sdp: msg.sdp,
+              from: clientsById.get(ws)
+            }));
+          }
+        } else if (msg.type === 'answer') {
+          // Handle answer - find target client and forward
+          const targetWs = findClientById(msg.to);
+          if (targetWs) {
+            targetWs.send(JSON.stringify({
+              type: 'answer',
+              sdp: msg.sdp,
+              from: clientsById.get(ws)
+            }));
+          }
+        } else if (msg.type === 'candidate') {
+          // Handle ICE candidate - find target client and forward
+          const targetWs = findClientById(msg.to);
+          if (targetWs) {
+            targetWs.send(JSON.stringify({
+              type: 'ice-candidate',
+              candidate: msg.candidate,
+              from: clientsById.get(ws)
+            }));
+          }
+        } else {
+          // For other message types, broadcast to all clients
+          broadcastJSON(msg, ws);
+        }
+      } catch (e) {
+        console.error('Error parsing message:', e);
+      }
     }
   });
   
-  // Send welcome message with clientId
-  const tempClientId = Date.now().toString();
-  ws.send(JSON.stringify({ type: 'welcome', clientId: tempClientId, clients: Array.from(clients.keys()) }));
-  
-  // Handle client disconnections
+  // Handle client disconnection
   ws.on('close', () => {
-    if (clientPeerId) {
-      console.log(`Client ${clientPeerId} disconnected`);
-      clients.delete(clientPeerId);
-      
-      // Clean up any pending candidates
-      if (pendingIceCandidates.has(clientPeerId)) {
-        pendingIceCandidates.delete(clientPeerId);
-      }
-      
-      // Notify other clients about disconnection
-      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
-      broadcastMessage(disconnectMsg, null);
-    } else {
-      console.log('Unknown client disconnected');
-    }
+    console.log('Client disconnected');
+    clients.delete(ws);
+    
+    // Notify other clients about disconnection
+    const clientId = clientsById.get(ws);
+    broadcastJSON({
+      type: 'peer-disconnected',
+      clientId
+    }, null);
+    
+    clientsById.delete(ws);
   });
   
   // Handle errors
@@ -212,11 +203,52 @@ function broadcastMessage(message, excludeClient) {
     message = parts.join('|');
   }
   
+  // Extract receiver ID to check if this is a direct message
+  const receiverId = parts[2];
+  
+  // If this is a direct message to a specific client
+  if (receiverId !== 'ALL' && !receiverId.includes('ALL')) {
+    // Find the target client and send only to them
+    for (const client of clients) {
+      const clientId = clientsById.get(client);
+      if (clientId && clientId.toString() === receiverId) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(message);
+          console.log(`Sent directed message to ${receiverId}`);
+        }
+        return; // Exit after sending to the target
+      }
+    }
+    console.log(`Target client ${receiverId} not found`);
+    return;
+  }
+  
+  // Otherwise broadcast to all (except sender if specified)
   clients.forEach((client) => {
     if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
   });
+}
+
+// Function to broadcast JSON messages to all clients except the sender
+function broadcastJSON(message, excludeClient) {
+  const messageStr = JSON.stringify(message);
+  clients.forEach((client) => {
+    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
+      client.send(messageStr);
+    }
+  });
+}
+
+// Function to find a client by its ID
+function findClientById(id) {
+  for (const [client, clientId] of clientsById.entries()) {
+    if (clientId.toString() === id.toString()) {
+      return client;
+    }
+  }
+  return null;
 }
 
 // Start the server
