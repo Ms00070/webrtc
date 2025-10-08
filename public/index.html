@@ -38,18 +38,24 @@
   <div id="log"></div>
  
   <script>
+    // Log helper function
     function logOnScreen(msg) {
       const logDiv = document.getElementById("log");
       logDiv.innerHTML += msg + "<br>";
       logDiv.scrollTop = logDiv.scrollHeight;
       console.log(msg);
     }
- 
+   
+    // Map to store pending ICE candidates until remote description is set
+    const pendingIceCandidates = new Map();
+    
+    // WebSocket connection
     const ws = new WebSocket("wss://webrtc-9gdy.onrender.com/");
     const peers = {};
     let localStream;
     const clientId = "WebClient-" + Date.now();
- 
+   
+    // Handle WebSocket open
     ws.onopen = () => {
       logOnScreen("Connected to custom WSS server");
       // Send NEWPEER in Unity format
@@ -57,7 +63,8 @@
       ws.send(newPeerMsg);
       logOnScreen(`Sent: ${newPeerMsg}`);
     };
- 
+   
+    // Handle WebSocket messages
     ws.onmessage = async (event) => {
       const msgStr = event.data;
       logOnScreen("Received: " + msgStr);
@@ -98,211 +105,258 @@
             }
           }
         } else {
-          // Try as JSON
-          const msg = JSON.parse(msgStr);
+          // Try to parse as JSON
+          const data = JSON.parse(msgStr);
           
-          if (msg.type === 'welcome') {
-            logOnScreen(`Received welcome with client ID: ${msg.clientId}`);
+          // Handle welcome message
+          if (data.type === 'welcome') {
+            logOnScreen(`Received welcome with client ID: ${data.clientId}`);
           }
           
-          // Handle JSON format answers
-          if (msg.type === 'answer' && peers[msg.from]) {
-            await peers[msg.from].setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-          }
-          
-          // Handle JSON format ICE candidates
-          if (msg.type === 'ice-candidate' && peers[msg.from]) {
-            try {
-              await peers[msg.from].addIceCandidate(msg.candidate);
-            } catch (e) {
-              logOnScreen(`Error adding ICE candidate: ${e.message}`);
-            }
-          }
-          
-          // Handle video requests
-          if (msg.type === 'MESSAGE' && msg.message === 'request-video') {
-            if (localStream) {
-              logOnScreen(`Sending video stream to ${msg.from}`);
-              createPeerConnection(msg.from);
-            } else {
-              logOnScreen("Video request received but no local stream available");
-            }
-          }
+          // Handle other JSON messages as needed
         }
       } catch (err) {
-        logOnScreen(`Error processing message: ${err.message}`);
+        logOnScreen(`Error handling message: ${err.message}`);
       }
     };
     
-    function handleUnityOffer(senderId, offerSdp) {
-      createPeerConnection(senderId);
-      
-      if (!peers[senderId]) {
-        logOnScreen(`No peer connection for ${senderId}`);
-        return;
-      }
-      
-      peers[senderId].setRemoteDescription({ type: 'offer', sdp: offerSdp })
-        .then(() => peers[senderId].createAnswer())
-        .then(answer => peers[senderId].setLocalDescription(answer))
-        .then(() => {
-          // Send answer in Unity format
-          const answerMsg = `ANSWER|${clientId}|${senderId}|${peers[senderId].localDescription.sdp}|0|true`;
-          ws.send(answerMsg);
-          logOnScreen(`Sent answer to ${senderId}`);
-        })
-        .catch(err => logOnScreen(`Error creating answer: ${err.message}`));
-    }
+    // Handle WebSocket errors and closure
+    ws.onerror = (error) => {
+      logOnScreen(`WebSocket error: ${error}`);
+    };
     
-    function handleUnityCandidate(senderId, candidateJson) {
-      if (!peers[senderId]) {
-        logOnScreen(`No peer connection for ${senderId}`);
-        return;
-      }
-      
-      try {
-        const candidate = JSON.parse(candidateJson);
-        peers[senderId].addIceCandidate(candidate)
-          .catch(err => logOnScreen(`Error adding ICE candidate: ${err.message}`));
-      } catch (e) {
-        logOnScreen(`Error parsing ICE candidate: ${e.message}`);
-      }
-    }
+    ws.onclose = () => {
+      logOnScreen("WebSocket connection closed");
+    };
     
+    // Create peer connection for Unity client
     function createPeerConnectionForUnity(unityClientId) {
-      if (peers[unityClientId]) {
-        logOnScreen(`Peer connection already exists for ${unityClientId}`);
-        return peers[unityClientId];
-      }
-      
       logOnScreen(`Creating peer connection for Unity client: ${unityClientId}`);
       
+      // Close existing connection if any
+      if (peers[unityClientId]) {
+        peers[unityClientId].close();
+      }
+      
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" }
+        ]
       });
       
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          // Send in Unity format
-          const candidateJson = JSON.stringify(event.candidate);
-          const msg = `CANDIDATE|${clientId}|${unityClientId}|${candidateJson}|0|false`;
-          ws.send(msg);
-          logOnScreen(`Sent ICE candidate to ${unityClientId}`);
-        }
-      };
+      // Store the connection
+      peers[unityClientId] = pc;
       
-      pc.onconnectionstatechange = () => {
-        logOnScreen(`Connection state with ${unityClientId}: ${pc.connectionState}`);
-      };
-      
-      // Add local stream tracks to connection
+      // Add local tracks to the connection
       if (localStream) {
         localStream.getTracks().forEach(track => {
           pc.addTrack(track, localStream);
         });
       }
+      
+      // Handle ICE candidate generation
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          // Format for Unity client
+          const candidateJson = JSON.stringify(event.candidate);
+          const candidateMsg = `CANDIDATE|${clientId}|${unityClientId}|${candidateJson}|0|false`;
+          ws.send(candidateMsg);
+          logOnScreen(`Sent ICE candidate to ${unityClientId}`);
+        }
+      };
+      
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        logOnScreen(`Connection state with ${unityClientId}: ${pc.connectionState}`);
+      };
       
       // Create and send offer
       pc.createOffer()
         .then(offer => pc.setLocalDescription(offer))
         .then(() => {
-          // Send in Unity format
-          const msg = `OFFER|${clientId}|${unityClientId}|${pc.localDescription.sdp}|0|true`;
-          ws.send(msg);
+          const offerMsg = `OFFER|${clientId}|${unityClientId}|${pc.localDescription.sdp}|0|true`;
+          ws.send(offerMsg);
           logOnScreen(`Sent offer to ${unityClientId}`);
         })
-        .catch(err => logOnScreen(`Error creating offer: ${err.message}`));
+        .catch(error => {
+          logOnScreen(`Error creating offer: ${error}`);
+        });
       
-      peers[unityClientId] = pc;
       return pc;
     }
     
-    function createPeerConnection(peerId) {
-      if (peers[peerId]) return peers[peerId];
-      
-      logOnScreen(`Creating peer connection for: ${peerId}`);
+    // Handle offer from Unity client
+    async function handleUnityOffer(senderId, offerSdp) {
+      try {
+        const pc = createPeerConnection(senderId, true);
+        
+        // Set remote description first
+        const offer = new RTCSessionDescription({ type: 'offer', sdp: offerSdp });
+        await pc.setRemoteDescription(offer);
+        logOnScreen(`Set remote description from ${senderId}`);
+        
+        // Create and set local answer
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        
+        // Send answer back to Unity client
+        const answerMsg = `ANSWER|${clientId}|${senderId}|${answer.sdp}|0|false`;
+        ws.send(answerMsg);
+        logOnScreen(`Sent answer to ${senderId}`);
+        
+        // Process any pending ICE candidates for this peer
+        const candidates = pendingIceCandidates.get(senderId) || [];
+        logOnScreen(`Processing ${candidates.length} pending ICE candidates for ${senderId}`);
+        
+        for (const candidate of candidates) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (e) {
+            logOnScreen(`Error adding stored ICE candidate: ${e}`);
+          }
+        }
+        
+        // Clear the pending candidates
+        pendingIceCandidates.delete(senderId);
+      } catch (e) {
+        logOnScreen(`Error handling offer: ${e}`);
+      }
+    }
+    
+    // Handle ICE candidate from Unity client
+    async function handleUnityCandidate(senderId, candidateStr) {
+      try {
+        const pc = peers[senderId];
+        if (!pc) {
+          logOnScreen(`No peer connection for ${senderId} to add ICE candidate`);
+          return;
+        }
+        
+        const candidate = JSON.parse(candidateStr);
+        
+        // Check if remote description is set
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          // Remote description is set, add the candidate directly
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          logOnScreen(`Added ICE candidate for ${senderId}`);
+        } else {
+          // Remote description not set yet, store the candidate
+          if (!pendingIceCandidates.has(senderId)) {
+            pendingIceCandidates.set(senderId, []);
+          }
+          pendingIceCandidates.get(senderId).push(new RTCIceCandidate(candidate));
+          logOnScreen(`Stored ICE candidate for ${senderId} (waiting for remote description)`);
+        }
+      } catch (e) {
+        logOnScreen(`Error handling ICE candidate: ${e}`);
+      }
+    }
+    
+    // Create peer connection (general function)
+    function createPeerConnection(peerId, isUnity = false) {
+      // Close existing connection if any
+      if (peers[peerId]) {
+        peers[peerId].close();
+      }
       
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" }
+        ]
       });
       
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          // Detect if Unity client (if ID starts with "Unity")
-          if (peerId.startsWith("Unity")) {
-            // Send in Unity format
-            const candidateJson = JSON.stringify(event.candidate);
-            const msg = `CANDIDATE|${clientId}|${peerId}|${candidateJson}|0|false`;
-            ws.send(msg);
-          } else {
-            // Send in JSON format
-            ws.send(JSON.stringify({
-              type: 'ice-candidate',
-              from: clientId,
-              to: peerId,
-              candidate: event.candidate
-            }));
-          }
-          logOnScreen(`Sent ICE candidate to ${peerId}`);
-        }
-      };
+      // Store the connection
+      peers[peerId] = pc;
       
-      pc.onconnectionstatechange = () => {
-        logOnScreen(`Connection state with ${peerId}: ${pc.connectionState}`);
-      };
-      
-      // Add local stream tracks to connection
+      // Add local tracks if available
       if (localStream) {
         localStream.getTracks().forEach(track => {
           pc.addTrack(track, localStream);
         });
       }
       
-      peers[peerId] = pc;
+      // Handle ICE candidate generation
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          if (isUnity) {
+            // Format for Unity client
+            const candidateJson = JSON.stringify(event.candidate);
+            const candidateMsg = `CANDIDATE|${clientId}|${peerId}|${candidateJson}|0|false`;
+            ws.send(candidateMsg);
+            logOnScreen(`Sent ICE candidate to ${peerId}`);
+          } else {
+            // Format for browser client
+            ws.send(JSON.stringify({
+              type: "candidate",
+              candidate: event.candidate,
+              to: peerId
+            }));
+          }
+        }
+      };
+      
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        logOnScreen(`Connection state with ${peerId}: ${pc.connectionState}`);
+      };
+      
       return pc;
     }
     
-    // Handle file selection
-    document.getElementById('fileInput').addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      
-      logOnScreen(`Selected file: ${file.name}`);
-      const url = URL.createObjectURL(file);
-      const video = document.getElementById('localVideo');
-      video.src = url;
+    // File input handling
+    document.getElementById('fileInput').addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (file) {
+        logOnScreen(`Selected file: ${file.name}`);
+        
+        // Create a video URL from the file
+        const videoUrl = URL.createObjectURL(file);
+        const videoElement = document.getElementById('localVideo');
+        videoElement.src = videoUrl;
+        
+        // Play the video once it's loaded
+        videoElement.onloadedmetadata = () => {
+          videoElement.play().catch(e => logOnScreen(`Error playing video: ${e}`));
+        };
+        
+        // Capture stream from the video element
+        videoElement.onplaying = () => {
+          try {
+            localStream = videoElement.captureStream();
+            logOnScreen("Captured stream from video");
+            logOnScreen("Ready to stream to Unity clients");
+          } catch (e) {
+            logOnScreen(`Error capturing stream: ${e}`);
+          }
+        };
+      }
     });
     
     // Start streaming button
     document.getElementById('startButton').addEventListener('click', () => {
-      const video = document.getElementById('localVideo');
-      
-      if (!video.src) {
+      if (!localStream) {
         logOnScreen("Please select a video file first");
         return;
       }
       
-      video.play();
-      
-      try {
-        localStream = video.captureStream();
-        logOnScreen("Captured stream from video");
-        logOnScreen("Ready to stream to Unity clients");
-      } catch (e) {
-        logOnScreen(`Error capturing stream: ${e.message}`);
-      }
+      // Find connected Unity clients and send them the video
+      Object.keys(peers).forEach(peerId => {
+        if (peerId.startsWith('UnityClient')) {
+          createPeerConnectionForUnity(peerId);
+        }
+      });
     });
     
     // Announce ready button
     document.getElementById('announceButton').addEventListener('click', () => {
       if (!localStream) {
-        logOnScreen("No stream to announce. Please start streaming first.");
+        logOnScreen("Please select a video file first");
         return;
       }
       
-      // Send in Unity format
-      const msg = `MESSAGE|${clientId}|ALL|sender-ready|0|true`;
-      ws.send(msg);
+      // Send ready message to all clients
+      const readyMsg = `MESSAGE|${clientId}|ALL|sender-ready|0|true`;
+      ws.send(readyMsg);
       logOnScreen("Announced sender-ready to all clients");
     });
   </script>
