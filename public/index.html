@@ -34,6 +34,7 @@ let localStream;
  
 function log(msg) {
   const logDiv = document.getElementById("log");
+  logDiv.innerHTML += msg + "<br>";
   logDiv.scrollTop = logDiv.scrollHeight;
   console.log(msg);
 }
