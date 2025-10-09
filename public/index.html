@@ -1,84 +1,50 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>WebRTC File Stream</title>
-</head>
-<body>
-  <h2>Upload video file and stream</h2>
-  <input type="file" id="fileInput" accept="video/*" />
-  <video id="localVideo" autoplay playsinline muted></video>
+<script>
+  // Replace localhost with your server URL if deployed
+  const ws = new WebSocket("wss://bytes.clear-trail.com/");
+  const peers = {};
+  let localStream;
 
-  <script>
-    const ws = new WebSocket("wss://bytes.clear-trail.com/");
-    let localStream;
-    const peers = {};
+  ws.onopen = () => console.log("Connected to custom WSS server");
 
-    // 1. On page load connect to signaling server
-    ws.onopen = () => {
-      console.log("Connected to signaling server ✅");
-      ws.send(JSON.stringify({ type: "hello", role: "sender" }));
-    };
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
 
-    // 2. Handle incoming signaling messages
-    ws.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
+    if (msg.type === "answer" && peers[msg.from]) {
+      await peers[msg.from].setRemoteDescription({ type: "answer", sdp: msg.sdp });
+    }
 
-      if (msg.type === "answer" && peers[msg.from]) {
-        await peers[msg.from].setRemoteDescription({ type: "answer", sdp: msg.sdp });
+    if (msg.type === "ice-candidate" && peers[msg.from]) {
+      try { await peers[msg.from].addIceCandidate(msg.candidate); } 
+      catch(e){ console.warn(e) }
+    }
+
+    if (msg.type === "request-offer" && msg.from && !peers[msg.from]) {
+      const pc = new RTCPeerConnection();
+      peers[msg.from] = pc;
+
+      if (localStream) localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) ws.send(JSON.stringify({ type: "ice-candidate", to: msg.from, candidate: e.candidate }));
       }
 
-      if (msg.type === "ice-candidate" && peers[msg.from]) {
-        try { await peers[msg.from].addIceCandidate(msg.candidate); }
-        catch (err) { console.warn(err); }
-      }
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
-      if (msg.type === "request-offer" && msg.from && !peers[msg.from]) {
-        console.log("Offer requested by:", msg.from);
+      ws.send(JSON.stringify({ type: "offer", to: msg.from, sdp: offer.sdp }));
+    }
+  };
 
-        const pc = new RTCPeerConnection();
-        peers[msg.from] = pc;
+  document.getElementById("fileInput").addEventListener("change", async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
 
-        // Add tracks from uploaded video
-        if (localStream) {
-          localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-        }
+    const video = document.getElementById("localVideo");
+    video.src = URL.createObjectURL(file);
+    await video.play();
 
-        pc.onicecandidate = (e) => {
-          if (e.candidate) {
-            ws.send(JSON.stringify({
-              type: "ice-candidate",
-              to: msg.from,
-              candidate: e.candidate
-            }));
-          }
-        };
+    localStream = video.captureStream();
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        ws.send(JSON.stringify({
-          type: "offer",
-          to: msg.from,
-          sdp: offer.sdp
-        }));
-      }
-    };
-
-    // 3. File upload → capture stream
-    document.getElementById("fileInput").addEventListener("change", async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-
-      const video = document.getElementById("localVideo");
-      video.src = URL.createObjectURL(file);
-      await video.play();
-
-      localStream = video.captureStream();
-
-      // notify peers that sender is ready
-      ws.send(JSON.stringify({ type: "broadcast", message: "sender-ready" }));
-      console.log("Sender ready, streaming video 🎥");
-    });
-  </script>
-</body>
-</html>
+    ws.send(JSON.stringify({ type: "broadcast", broadcast: true, message: "sender-ready" }));
+  });
+</script>
