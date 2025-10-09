@@ -11,7 +11,7 @@
   </style>
 </head>
 <body>
-  <h2>WebRTC Streamer</h2>
+  <h2>WebRTC Streamer 1</h2>
   <input type="file" id="fileInput" accept="video/*">
   <button id="startBtn">Start Stream</button>
  
@@ -30,6 +30,7 @@ const peerId = "WebClient-" + Math.floor(Math.random()*10000);
  
 const peerConnections = {};
 const dataChannels = {};
+const knownPeers = new Set();
 let localStream;
  
 function log(msg) {
@@ -56,11 +57,13 @@ ws.onmessage = async (event) => {
 
   if (msg_type === "NEWPEER" && sender !== peerId) {
     log(`Peer connected: ${sender}`);
+    knownPeers.add(sender);
     return;
   }
 
   if (msg_type === "DISPOSE" && sender !== peerId) {
     log(`Peer disconnected: ${sender}`);
+    knownPeers.delete(sender);
     if (peerConnections[sender]) {
       peerConnections[sender].close();
       delete peerConnections[sender];
@@ -157,9 +160,10 @@ document.getElementById("startBtn").onclick = async () => {
   localStream = video.captureStream();
   log("Local stream ready");
  
-  // Send offer to all connected peers
-  for (const remotePeerId in peerConnections) {
-    const pc = peerConnections[remotePeerId];
+  // Send offer to all known peers
+  for (const remotePeerId of knownPeers) {
+    if (peerConnections[remotePeerId]) continue; // Don't re-offer
+    const pc = createPeerConnection(remotePeerId);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify(offer)}`);
