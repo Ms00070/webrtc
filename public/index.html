@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC Signaling Tester</title>
+  <title>WebRTC Multi-Peer Video</title>
   <style>
     body {
       font-family: Arial, sans-serif;
-      max-width: 800px;
+      max-width: 900px;
       margin: 0 auto;
       padding: 20px;
     }
@@ -18,8 +18,8 @@
     }
     .video-container {
       display: flex;
-      gap: 10px;
       flex-wrap: wrap;
+      gap: 10px;
     }
     video {
       width: 320px;
@@ -49,25 +49,19 @@
       overflow-y: auto;
       font-family: monospace;
     }
-    .connected {
-      color: green;
-    }
-    .disconnected {
-      color: red;
-    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>WebRTC Signaling Test Client</h1>
-    
-    <div class="video-container">
+    <h1>WebRTC Multi-Peer Video Test Client</h1>
+
+    <div class="video-container" id="videoContainer">
       <div>
         <h3>Local Video</h3>
         <video id="localVideo" autoplay muted playsinline></video>
       </div>
     </div>
-    
+
     <div class="control-panel">
       <h3>Connection Controls</h3>
       <div>
@@ -89,7 +83,7 @@
       </div>
       <div>
         <button id="startStreamBtn">Start Stream</button>
-        <button id="connectBtn" disabled>Connect to Signaling Server</button>
+        <button id="connectBtn" disabled>Connect</button>
         <button id="disconnectBtn" disabled>Disconnect</button>
       </div>
       <div>
@@ -98,7 +92,7 @@
         <button id="sendDataBtn" disabled>Send</button>
       </div>
     </div>
-    
+
     <div>
       <h3>Status Log</h3>
       <div id="statusLog" class="status"></div>
@@ -106,10 +100,9 @@
   </div>
 
   <script>
-    // DOM elements
     const localVideo = document.getElementById('localVideo');
-    const remoteVideo = document.getElementById('remoteVideo');
     const fileVideo = document.getElementById('fileVideo');
+    const videoContainer = document.getElementById('videoContainer');
     const peerIdInput = document.getElementById('peerId');
     const startStreamBtn = document.getElementById('startStreamBtn');
     const connectBtn = document.getElementById('connectBtn');
@@ -121,49 +114,41 @@
     const fileSourceRadio = document.getElementById('fileSource');
     const fileInputContainer = document.getElementById('fileInputContainer');
     const videoFileInput = document.getElementById('videoFileInput');
-    
-    // WebRTC variables
+
     let localStream;
     const peerConnections = {}; // peerId -> RTCPeerConnection
-    const dataChannels = {};    // peerId -> data channel
+    const dataChannels = {};    // peerId -> DataChannel
     let ws;
     let peerId;
 
-    // Log helper
-    function log(message, isError = false) {
-      const logEntry = document.createElement('div');
-      logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-      if (isError) logEntry.style.color = 'red';
-      statusLog.appendChild(logEntry);
+    function log(message, isError=false) {
+      const entry = document.createElement('div');
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      if (isError) entry.style.color = 'red';
+      statusLog.appendChild(entry);
       statusLog.scrollTop = statusLog.scrollHeight;
     }
 
-    // Handle stream source selection
     cameraSourceRadio.addEventListener('change', () => {
-      if (cameraSourceRadio.checked) fileInputContainer.style.display = 'none';
+      fileInputContainer.style.display = cameraSourceRadio.checked ? 'none' : 'block';
     });
     fileSourceRadio.addEventListener('change', () => {
-      if (fileSourceRadio.checked) fileInputContainer.style.display = 'block';
+      fileInputContainer.style.display = fileSourceRadio.checked ? 'block' : 'none';
     });
 
-    // File selection
-    videoFileInput.addEventListener('change', (event) => {
-      const file = event.target.files[0];
+    videoFileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
       if (file) {
         const url = URL.createObjectURL(file);
         fileVideo.src = url;
         fileVideo.onloadedmetadata = () => {
-          log(`Loaded video: ${file.name} (${Math.round(file.size / 1024 / 1024)}MB)`);
+          log(`Loaded video file: ${file.name} (${Math.round(file.size/1024/1024)}MB)`);
         };
       }
     });
 
-    // Start stream manually
-    startStreamBtn.addEventListener('click', async () => {
-      await startStream();
-    });
+    startStreamBtn.addEventListener('click', async () => await startStream());
 
-    // === Function to start stream (camera by default) ===
     async function startStream() {
       try {
         if (cameraSourceRadio.checked) {
@@ -183,50 +168,25 @@
         }
         startStreamBtn.disabled = true;
         connectBtn.disabled = false;
-      } catch (error) {
-        log(`Error starting stream: ${error.message}`, true);
+      } catch (err) {
+        log(`Error starting stream: ${err.message}`, true);
       }
     }
 
-    // Connect manually
-    connectBtn.addEventListener('click', () => {
-      initConnection();
-    });
+    connectBtn.addEventListener('click', () => initConnection());
+    disconnectBtn.addEventListener('click', () => disconnectAll());
+    sendDataBtn.addEventListener('click', () => sendData());
 
-    // Disconnect manually
-    disconnectBtn.addEventListener('click', () => {
-      if (ws) {
-        ws.send(`DISPOSE|${peerId}|ALL|Remove peerConnection for ${peerId}.|0|false`);
-        ws.close();
-      }
-      cleanupRTCConnection();
-      connectBtn.disabled = !localStream;
-      disconnectBtn.disabled = true;
-      sendDataBtn.disabled = true;
-    });
-
-    // Send data
-    sendDataBtn.addEventListener('click', () => {
-      const message = dataMessageInput.value.trim();
-      if (message && dataChannel && dataChannel.readyState === 'open') {
-        dataChannel.send(message);
-        log(`Sent data: ${message}`);
-        dataMessageInput.value = '';
-      }
-    });
-
-    // Init connection
     function initConnection() {
       peerId = peerIdInput.value.trim() || `WebClient-${Date.now()}`;
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       const wsUrl = `${protocol}${window.location.host}`;
-
-      log(`Connecting to signaling server at ${wsUrl}...`);
+      log(`Connecting to signaling server: ${wsUrl}`);
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
         log('Connected to signaling server');
-        ws.send(`NEWPEER|${peerId}|ALL|New web client peer|0|true`);
+        ws.send(`NEWPEER|${peerId}|ALL|New peer|0|true`);
         connectBtn.disabled = true;
         disconnectBtn.disabled = false;
         sendDataBtn.disabled = false;
@@ -234,202 +194,169 @@
 
       ws.onclose = () => {
         log('Disconnected from signaling server', true);
-        connectBtn.disabled = false;
-        disconnectBtn.disabled = true;
-        sendDataBtn.disabled = true;
-        cleanupRTCConnection();
+        disconnectAll();
       };
 
-      ws.onerror = (error) => log(`WebSocket error: ${error.message}`, true);
+      ws.onerror = (err) => log(`WebSocket error: ${err.message}`, true);
+
       ws.onmessage = (event) => handleSignalingMessage(event.data);
     }
 
-    // --- WebRTC Handlers ---
     function handleSignalingMessage(message) {
-      const parts = message.split('|');
-      const type = parts[0];
-      const senderId = parts[1];
-      const receiverId = parts[2];
-      const msgContent = parts[3];
+      const [type, senderId, receiverId, msgContent] = message.split('|');
 
       if (receiverId !== peerId && receiverId !== 'ALL') return;
 
       log(`Received ${type} from ${senderId}`);
 
-      switch (type) {
+      switch(type) {
         case 'NEWPEER':
         case 'NEWPEERACK':
-            if (!peerConnections[senderId]) createPeerConnection(senderId);
-            break;
+          if (!peerConnections[senderId]) createPeerConnection(senderId);
+          break;
         case 'OFFER':
-          if (senderId !== peerId) handleOffer(senderId, msgContent);
+          handleOffer(senderId, msgContent);
           break;
         case 'ANSWER':
-          if (senderId !== peerId) handleAnswer(senderId, msgContent);
+          handleAnswer(senderId, msgContent);
           break;
         case 'CANDIDATE':
-          if (senderId !== peerId) handleCandidate(senderId, msgContent);
+          handleCandidate(senderId, msgContent);
           break;
         case 'DISPOSE':
-          if (senderId !== peerId) {
-            log(`Peer ${senderId} disconnected`);
-            cleanupRTCConnection();
-          }
+          removePeer(senderId);
           break;
-        default:
-          log(`Unknown message type: ${type}`);
       }
     }
 
-    // function createPeerConnection(remotePeerId) {
-    //   log(`Creating connection with ${remotePeerId}`);
-    //   const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    //   peerConnection = new RTCPeerConnection(configuration);
-
-    //   dataChannel = peerConnection.createDataChannel('dataChannel');
-    //   setupDataChannel(dataChannel);
-
-    //   if (localStream) {
-    //     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-    //   }
-
-    //   peerConnection.onicecandidate = (event) => {
-    //     if (event.candidate) {
-    //       const candidateObj = {
-    //         sdpMid: event.candidate.sdpMid,
-    //         sdpMLineIndex: event.candidate.sdpMLineIndex,
-    //         candidate: event.candidate.candidate
-    //       };
-    //       ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(candidateObj)}`);
-    //     }
-    //   };
-
-    //   peerConnection.oniceconnectionstatechange = () => log(`ICE state: ${peerConnection.iceConnectionState}`);
-    //   peerConnection.ontrack = (event) => {
-    //     log('Received remote track');
-    //     //remoteVideo.srcObject = event.streams[0];
-    //   };
-    //   peerConnection.ondatachannel = (event) => {
-    //     log('Received data channel');
-    //     setupDataChannel(event.channel);
-    //   };
-
-    //   createOffer(remotePeerId);
-    // }
-
     function createPeerConnection(remotePeerId) {
-        if (peerConnections[remotePeerId]) return; // already exists
+      log(`Creating connection with ${remotePeerId}`);
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
-        log(`Creating connection with ${remotePeerId}`);
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      // Add local tracks
+      if (localStream) localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-        // data channel
-        const dc = pc.createDataChannel('dataChannel');
-        setupDataChannel(dc);
-        dataChannels[remotePeerId] = dc;
+      // Data channel
+      const dc = pc.createDataChannel('dataChannel');
+      setupDataChannel(dc, remotePeerId);
+      dataChannels[remotePeerId] = dc;
 
-        // add local tracks
-        if (localStream) {
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      // ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
         }
+      };
 
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-            ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
-            }
-        };
-
-        pc.ontrack = (event) => {
-            log(`Received remote track from ${remotePeerId}`);
-        };
-
-        pc.ondatachannel = (event) => {
-            setupDataChannel(event.channel);
-        };
-
-        peerConnections[remotePeerId] = pc;
-
-        // create and send offer
-        createOffer(remotePeerId);
+      // Remote tracks
+      pc.ontrack = (event) => {
+        log(`Received remote track from ${remotePeerId}`);
+        let remoteEl = document.getElementById(`remoteVideo-${remotePeerId}`);
+        if (!remoteEl) {
+          remoteEl = document.createElement('video');
+          remoteEl.id = `remoteVideo-${remotePeerId}`;
+          remoteEl.autoplay = true;
+          remoteEl.playsInline = true;
+          const wrapper = document.createElement('div');
+          const label = document.createElement('h3');
+          label.textContent = `Remote Video: ${remotePeerId}`;
+          wrapper.appendChild(label);
+          wrapper.appendChild(remoteEl);
+          videoContainer.appendChild(wrapper);
         }
+        remoteEl.srcObject = event.streams[0];
+      };
 
+      pc.ondatachannel = (event) => setupDataChannel(event.channel, remotePeerId);
+
+      peerConnections[remotePeerId] = pc;
+      createOffer(remotePeerId);
+      return pc;
+    }
 
     async function createOffer(remotePeerId) {
-      try {
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        const offerObj = { type: 'offer', sdp: peerConnection.localDescription.sdp };
-        ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify(offerObj)}`);
-        log(`Sent offer to ${remotePeerId}`);
-      } catch (err) {
-        log(`Error creating offer: ${err.message}`, true);
-      }
+      const pc = peerConnections[remotePeerId];
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify({ type:'offer', sdp: pc.localDescription.sdp })}`);
+      log(`Sent offer to ${remotePeerId}`);
     }
 
     async function handleOffer(senderId, offerMessage) {
-      try {
-        const offerObj = JSON.parse(offerMessage);
-        if (!peerConnection) createPeerConnection(senderId);
-        await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerObj.sdp }));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        const answerObj = { type: 'answer', sdp: peerConnection.localDescription.sdp };
-        ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answerObj)}`);
-        log(`Sent answer to ${senderId}`);
-      } catch (err) {
-        log(`Error handling offer: ${err.message}`, true);
-      }
+      const pc = peerConnections[senderId] || createPeerConnection(senderId);
+      const offerObj = JSON.parse(offerMessage);
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerObj.sdp }));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify({ type:'answer', sdp: pc.localDescription.sdp })}`);
+      log(`Sent answer to ${senderId}`);
     }
 
     async function handleAnswer(senderId, answerMessage) {
-      try {
-        const answerObj = JSON.parse(answerMessage);
-        await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerObj.sdp }));
-        log(`Processed answer from ${senderId}`);
-      } catch (err) {
-        log(`Error handling answer: ${err.message}`, true);
-      }
+      const pc = peerConnections[senderId];
+      if (!pc) return;
+      const answerObj = JSON.parse(answerMessage);
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerObj.sdp }));
+      log(`Processed answer from ${senderId}`);
     }
 
     async function handleCandidate(senderId, candidateMessage) {
-      try {
-        const candidateObj = JSON.parse(candidateMessage);
-        if (candidateObj.candidate) {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(candidateObj));
-        }
-      } catch (err) {
-        log(`Error handling ICE candidate: ${err.message}`, true);
+      const pc = peerConnections[senderId];
+      if (!pc) return;
+      const candidateObj = JSON.parse(candidateMessage);
+      if (candidateObj.candidate) await pc.addIceCandidate(new RTCIceCandidate(candidateObj));
+    }
+
+    function setupDataChannel(channel, remotePeerId) {
+      channel.onopen = () => { log(`Data channel open with ${remotePeerId}`); sendDataBtn.disabled = false; };
+      channel.onclose = () => { log(`Data channel closed with ${remotePeerId}`); };
+      channel.onmessage = (e) => log(`Data from ${remotePeerId}: ${e.data}`);
+      channel.onerror = (e) => log(`Data channel error with ${remotePeerId}: ${e.message}`, true);
+    }
+
+    function sendData() {
+      const msg = dataMessageInput.value.trim();
+      if (!msg) return;
+      for (const peerId in dataChannels) {
+        const dc = dataChannels[peerId];
+        if (dc.readyState === 'open') dc.send(msg);
       }
+      log(`Sent data to all peers: ${msg}`);
+      dataMessageInput.value = '';
     }
 
-    function setupDataChannel(channel) {
-      channel.onopen = () => { log('Data channel opened'); sendDataBtn.disabled = false; };
-      channel.onclose = () => { log('Data channel closed'); sendDataBtn.disabled = true; };
-      channel.onmessage = (e) => log(`Received data: ${e.data}`);
-      channel.onerror = (e) => log(`Data channel error: ${e.message}`, true);
+    function removePeer(remotePeerId) {
+      log(`Peer ${remotePeerId} disconnected`);
+      if (peerConnections[remotePeerId]) peerConnections[remotePeerId].close();
+      delete peerConnections[remotePeerId];
+      if (dataChannels[remotePeerId]) dataChannels[remotePeerId].close();
+      delete dataChannels[remotePeerId];
+      const videoEl = document.getElementById(`remoteVideo-${remotePeerId}`);
+      if (videoEl && videoEl.parentNode) videoEl.parentNode.remove();
     }
 
-    function cleanupRTCConnection() {
-      if (peerConnection) { peerConnection.close(); peerConnection = null; }
-      if (dataChannel) { dataChannel.close(); dataChannel = null; }
-      //remoteVideo.srcObject = null;
+    function disconnectAll() {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(`DISPOSE|${peerId}|ALL|Remove peerConnection for ${peerId}.|0|false`);
+      for (const pid in peerConnections) peerConnections[pid].close();
+      for (const pid in dataChannels) dataChannels[pid].close();
+      Object.keys(peerConnections).forEach(k => delete peerConnections[k]);
+      Object.keys(dataChannels).forEach(k => delete dataChannels[k]);
       startStreamBtn.disabled = false;
-      connectBtn.disabled = true;
+      connectBtn.disabled = !localStream;
+      disconnectBtn.disabled = true;
+      sendDataBtn.disabled = true;
     }
 
-    // Dispose on unload
     window.addEventListener('beforeunload', () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(`DISPOSE|${peerId}|ALL|Remove peerConnection for ${peerId}.|0|false`);
-      }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(`DISPOSE|${peerId}|ALL|Remove peerConnection for ${peerId}.|0|false`);
       if (fileVideo.src.startsWith('blob:')) URL.revokeObjectURL(fileVideo.src);
     });
 
-    // === Auto Start & Connect on Page Load ===
     window.addEventListener('load', async () => {
-      await startStream();     // Start camera automatically
-      initConnection();        // Connect automatically
+      await startStream();
+      initConnection();
     });
+
   </script>
 </body>
 </html>
