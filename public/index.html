@@ -2,180 +2,164 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC Multi-Peer Streaming</title>
+  <title>WebRTC Streamer</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; }
-    video { width: 320px; height: 240px; background: #000; border: 1px solid #ccc; margin: 5px; }
-    .status { border: 1px solid #ccc; padding: 10px; height: 180px; overflow-y: auto; font-family: monospace; }
+    body { font-family: Arial, sans-serif; background: #f2f2f2; }
+    #log { background: #000; color: #0f0; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; }
+    video { width: 300px; margin: 10px; border: 2px solid #333; }
+    button { padding: 10px 20px; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <h1>WebRTC Multi-Peer Streaming (File → Unity & Python)</h1>
+  <h2>WebRTC Streamer</h2>
+  <input type="file" id="fileInput" accept="video/*">
+  <button id="startBtn">Start Stream</button>
 
-  <div>
-    <label>Peer ID:</label>
-    <input type="text" id="peerId" value="WebClient-User1">
-  </div>
+  <h3>Logs</h3>
+  <div id="log"></div>
 
-  <div>
-    <input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/ogg">
-    <button id="startStreamBtn">Start Stream</button>
-  </div>
+  <h3>Local Video</h3>
+  <video id="localVideo" autoplay controls></video>
 
-  <div>
-    <h3>Local Stream</h3>
-    <video id="localVideo" autoplay muted playsinline></video>
-  </div>
-
-  <div>
-    <h3>Remote Streams</h3>
-    <div id="remoteVideos"></div>
-  </div>
-
-  <h3>Status</h3>
-  <div id="statusLog" class="status"></div>
+  <h3>Remote Videos</h3>
+  <div id="remoteVideos"></div>
 
 <script>
-const peerIdInput = document.getElementById('peerId');
-const videoFileInput = document.getElementById('videoFileInput');
-const startStreamBtn = document.getElementById('startStreamBtn');
-const localVideo = document.getElementById('localVideo');
-const remoteVideos = document.getElementById('remoteVideos');
-const statusLog = document.getElementById('statusLog');
+const ws = new WebSocket("wss://bytes.clear-trail.com/"); // update if local: ws://localhost:8080
+const peerId = "WebClient-" + Math.floor(Math.random()*10000);
 
-// WebRTC maps
 const peerConnections = {};
 const dataChannels = {};
-let ws, peerId, localStream, fileVideo;
+let localStream;
 
-// Log
-function log(msg, err=false) {
-  const div = document.createElement('div');
-  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-  if (err) div.style.color = 'red';
-  statusLog.appendChild(div);
-  statusLog.scrollTop = statusLog.scrollHeight;
+function log(msg) {
+  const logDiv = document.getElementById("log");
+  logDiv.innerHTML += msg + "<br>";
+  logDiv.scrollTop = logDiv.scrollHeight;
+  console.log(msg);
 }
 
-// --- WebSocket connect on page load ---
-window.addEventListener('load', () => {
-  peerId = peerIdInput.value.trim();
-  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  const wsUrl = proto + location.host;
-  ws = new WebSocket(wsUrl);
-  ws.onopen = () => {
-    log('Connected to signaling server');
-    ws.send(`NEWPEER|${peerId}|ALL|New peer|0|true`);
-  };
-  ws.onmessage = (e) => handleSignalingMessage(e.data);
-  ws.onclose = () => log('Disconnected', true);
-});
+ws.onopen = () => {
+  log("Connected to signaling server");
+  ws.send(JSON.stringify({ type: "register", id: peerId }));
+};
 
-// --- Start streaming selected video file ---
-startStreamBtn.addEventListener('click', async () => {
-  const file = videoFileInput.files[0];
-  if (!file) { log('Select a video file first', true); return; }
-
-  fileVideo = document.createElement('video');
-  fileVideo.src = URL.createObjectURL(file);
-  await fileVideo.play();
-  localStream = fileVideo.captureStream();
-  localVideo.srcObject = localStream;
-  log(`Streaming file: ${file.name}`);
-});
-
-// --- Handle signaling messages ---
-function handleSignalingMessage(message) {
-  const [type, senderId, receiverId, content] = message.split('|');
-  if (senderId === peerId) return;
-
-  if (receiverId !== peerId && receiverId !== 'ALL') return;
-  log(`Received ${type} from ${senderId}`);
-
-  switch(type) {
-    case 'NEWPEER': if (!peerConnections[senderId]) createPeerConnection(senderId); break;
-    case 'OFFER': handleOffer(senderId, content); break;
-    case 'ANSWER': handleAnswer(senderId, content); break;
-    case 'CANDIDATE': handleCandidate(senderId, content); break;
-    case 'DISPOSE': removePeer(senderId); break;
+ws.onmessage = async (event) => {
+  if (event.data.startsWith("JOINED|")) {
+    const joinedId = event.data.split("|")[1];
+    log(`Client connected: ${joinedId}`);
+    return;
   }
-}
+  if (event.data.startsWith("DISCONNECTED|")) {
+    const leftId = event.data.split("|")[1];
+    log(`Client disconnected: ${leftId}`);
+    if (peerConnections[leftId]) {
+      peerConnections[leftId].close();
+      delete peerConnections[leftId];
+    }
+    const vid = document.getElementById("remote-" + leftId);
+    if (vid) vid.remove();
+    return;
+  }
 
-// --- Create PeerConnection ---
-function createPeerConnection(remoteId) {
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-  peerConnections[remoteId] = pc;
+  const parts = event.data.split("|", 4);
+  if (parts.length < 4) return;
+  const [type, sender, target, payload] = parts;
 
+  if (type === "OFFER" && target === peerId) {
+    await handleOffer(sender, payload);
+  } else if (type === "ANSWER" && target === peerId) {
+    await handleAnswer(sender, payload);
+  } else if (type === "CANDIDATE" && target === peerId) {
+    await handleCandidate(sender, payload);
+  }
+};
+
+function createPeerConnection(remotePeerId) {
+  log(`Creating connection with ${remotePeerId}`);
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  peerConnections[remotePeerId] = pc;
+
+  // Add local tracks
   if (localStream) {
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
   }
 
-  const dc = pc.createDataChannel('chat');
-  setupDataChannel(remoteId, dc);
-  dataChannels[remoteId] = dc;
-
-  pc.onicecandidate = e => {
-    if (e.candidate) {
-      ws.send(`CANDIDATE|${peerId}|${remoteId}|${JSON.stringify(e.candidate)}`);
+  // ICE
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
     }
   };
-  pc.ontrack = e => attachRemoteStream(remoteId, e.streams[0]);
-  pc.ondatachannel = e => setupDataChannel(remoteId, e.channel);
 
-  createOffer(remoteId);
+  // Remote track
+  pc.ontrack = (event) => {
+    log(`Remote stream from ${remotePeerId}`);
+    let video = document.getElementById("remote-" + remotePeerId);
+    if (!video) {
+      video = document.createElement("video");
+      video.id = "remote-" + remotePeerId;
+      video.autoplay = true;
+      video.controls = true;
+      document.getElementById("remoteVideos").appendChild(video);
+    }
+    video.srcObject = event.streams[0];
+  };
+
+  // Data channel
+  const dc = pc.createDataChannel("dataChannel");
+  dc.onmessage = (e) => log(`Data from ${remotePeerId}: ${e.data}`);
+  dataChannels[remotePeerId] = dc;
+
+  return pc;
 }
 
-// --- Offers/Answers ---
-async function createOffer(remoteId) {
-  const pc = peerConnections[remoteId];
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  ws.send(`OFFER|${peerId}|${remoteId}|${JSON.stringify(offer)}`);
-}
-async function handleOffer(senderId, msg) {
-  const offer = JSON.parse(msg);
-  let pc = peerConnections[senderId];
-  if (!pc) pc = createPeerConnection(senderId);
+async function handleOffer(sender, payload) {
+  const pc = createPeerConnection(sender);
+  const offer = JSON.parse(payload);
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answer)}`);
-}
-async function handleAnswer(senderId, msg) {
-  const answer = JSON.parse(msg);
-  const pc = peerConnections[senderId];
-  if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
-}
-async function handleCandidate(senderId, msg) {
-  const cand = JSON.parse(msg);
-  const pc = peerConnections[senderId];
-  if (pc) await pc.addIceCandidate(new RTCIceCandidate(cand));
+  ws.send(`ANSWER|${peerId}|${sender}|${JSON.stringify(answer)}`);
 }
 
-// --- Helpers ---
-function setupDataChannel(remoteId, ch) {
-  ch.onopen = () => log(`DC open with ${remoteId}`);
-  ch.onmessage = e => log(`DC msg from ${remoteId}: ${e.data}`);
+async function handleAnswer(sender, payload) {
+  const pc = peerConnections[sender];
+  if (!pc) return;
+  const answer = JSON.parse(payload);
+  await pc.setRemoteDescription(new RTCSessionDescription(answer));
 }
-function attachRemoteStream(id, stream) {
-  let v = document.getElementById('remote-'+id);
-  if (!v) {
-    v = document.createElement('video');
-    v.id = 'remote-'+id;
-    v.autoplay = true; v.playsInline = true;
-    remoteVideos.appendChild(v);
+
+async function handleCandidate(sender, payload) {
+  const pc = peerConnections[sender];
+  if (!pc) return;
+  const candidate = JSON.parse(payload);
+  await pc.addIceCandidate(new RTCIceCandidate(candidate));
+}
+
+// Start stream from file
+document.getElementById("startBtn").onclick = async () => {
+  const file = document.getElementById("fileInput").files[0];
+  if (!file) {
+    log("No video file selected");
+    return;
   }
-  v.srcObject = stream;
-}
-function removePeer(id) {
-  log(`Peer ${id} disconnected`);
-  if (peerConnections[id]) peerConnections[id].close();
-  delete peerConnections[id];
-  delete dataChannels[id];
-  const v = document.getElementById('remote-'+id);
-  if (v) v.remove();
-}
+  const video = document.getElementById("localVideo");
+  video.src = URL.createObjectURL(file);
+  await video.play();
+
+  localStream = video.captureStream();
+  log("Local stream ready");
+
+  // Send offer to all connected peers
+  for (const remotePeerId in peerConnections) {
+    const pc = peerConnections[remotePeerId];
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify(offer)}`);
+    log(`Sent OFFER to ${remotePeerId}`);
+  }
+};
 </script>
 </body>
 </html>
