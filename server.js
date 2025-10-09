@@ -1,75 +1,61 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const path = require('path');
+// Simple WebSocket signaling server
+const WebSocket = require("ws");
 
-// Create Express app
-const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+const wss = new WebSocket.Server({ port: PORT });
+const clients = {};
 
-// Serve static files from "public"
-app.use(express.static(path.join(__dirname, 'public')));
+wss.on("connection", (ws) => {
+  console.log("New WebSocket connection");
 
-// Create HTTP server
-const server = http.createServer(app);
+  ws.on("message", (msg) => {
+    const message = msg.toString();
 
-// Create WebSocket server
-const wss = new WebSocket.Server({ server });
+    // Registration
+    if (message.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed.type === "register") {
+          clients[parsed.id] = ws;
+          console.log(`Client registered: ${parsed.id}`);
 
-// Store connected clients { peerId: ws }
-const clients = new Map();
-
-wss.on('connection', (ws) => {
-  console.log('Client connected');
-  let clientPeerId = null;
-
-  ws.on('message', (message) => {
-    const messageStr = message.toString();
-    console.log(`Received: ${messageStr}`);
-    try {
-      const parts = messageStr.split('|');
-      const type = parts[0];
-      const senderId = parts[1];
-      const receiverId = parts[2];
-
-      if (type === 'NEWPEER') {
-        clientPeerId = senderId;
-        clients.set(senderId, ws);
-        console.log(`Registered ${senderId}`);
-        broadcastMessage(messageStr, ws);
-      } else if (receiverId && receiverId !== 'ALL') {
-        const target = clients.get(receiverId);
-        if (target && target.readyState === WebSocket.OPEN) {
-          target.send(messageStr);
+          // Broadcast JOINED
+          Object.values(clients).forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(`JOINED|${parsed.id}`);
+            }
+          });
+          return;
         }
-      } else if (receiverId === 'ALL') {
-        broadcastMessage(messageStr, ws);
+      } catch (err) {
+        console.error("Bad JSON:", err);
       }
-    } catch (err) {
-      console.error('Error processing message:', err);
+    }
+
+    // Signaling relay (OFFER, ANSWER, CANDIDATE)
+    const parts = message.split("|", 4);
+    if (parts.length === 4) {
+      const [type, sender, target, payload] = parts;
+      if (clients[target] && clients[target].readyState === WebSocket.OPEN) {
+        clients[target].send(message);
+      }
     }
   });
 
-  ws.on('close', () => {
-    if (clientPeerId) {
-      console.log(`Client ${clientPeerId} disconnected`);
-      clients.delete(clientPeerId);
-      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
-      broadcastMessage(disconnectMsg, null);
+  ws.on("close", () => {
+    for (const id in clients) {
+      if (clients[id] === ws) {
+        console.log(`Client disconnected: ${id}`);
+        delete clients[id];
+        // Broadcast DISCONNECTED
+        Object.values(clients).forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(`DISCONNECTED|${id}`);
+          }
+        });
+      }
     }
   });
-
-  ws.on('error', (err) => console.error('WebSocket error:', err));
 });
 
-function broadcastMessage(message, exclude) {
-  wss.clients.forEach((client) => {
-    if (client !== exclude && client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
-}
-
-server.listen(port, () => {
-  console.log(`Signaling server running on port ${port}`);
-});
+console.log(`Signaling server running on ws://localhost:${PORT}`);
