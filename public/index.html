@@ -11,7 +11,7 @@
   </style>
 </head>
 <body>
-  <h2>WebRTC Streamer 1</h2>
+  <h2>WebRTC Streamer</h2>
   <input type="file" id="fileInput" accept="video/*">
   <button id="startBtn">Start Stream</button>
  
@@ -86,7 +86,16 @@ ws.onmessage = async (event) => {
  
 function createPeerConnection(remotePeerId) {
   log(`Creating connection with ${remotePeerId}`);
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  const pc = new RTCPeerConnection({ 
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      {
+        urls: "turn:openrelay.metered.ca:80",
+        username: "openrelayproject",
+        credential: "openrelayproject"
+      }
+    ] 
+  });
   peerConnections[remotePeerId] = pc;
  
   // Add local tracks
