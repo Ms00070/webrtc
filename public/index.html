@@ -14,84 +14,89 @@
   <h2>WebRTC Streamer</h2>
   <input type="file" id="fileInput" accept="video/*">
   <button id="startBtn">Start Stream</button>
-
+ 
   <h3>Logs</h3>
   <div id="log"></div>
-
+ 
   <h3>Local Video</h3>
   <video id="localVideo" autoplay controls></video>
-
+ 
   <h3>Remote Videos</h3>
   <div id="remoteVideos"></div>
-
+ 
 <script>
-const ws = new WebSocket("wss://webrtc-9gdy.onrender.com/"); // update if local: ws://localhost:8080
+const ws = new WebSocket("wss://webrtc-9gdy.onrender.com/"); // Changed to the correct server
 const peerId = "WebClient-" + Math.floor(Math.random()*10000);
-
+ 
 const peerConnections = {};
 const dataChannels = {};
 let localStream;
-
+ 
 function log(msg) {
   const logDiv = document.getElementById("log");
-  logDiv.innerHTML += msg + "<br>";
   logDiv.scrollTop = logDiv.scrollHeight;
   console.log(msg);
 }
-
+ 
 ws.onopen = () => {
   log("Connected to signaling server");
-  ws.send(JSON.stringify({ type: "register", id: peerId }));
+  // Announce self using the pipe-delimited format
+  ws.send(`NEWPEER|${peerId}|ALL|Web client connected|0|false`);
 };
-
+ 
 ws.onmessage = async (event) => {
-  if (event.data.startsWith("JOINED|")) {
-    const joinedId = event.data.split("|")[1];
-    log(`Client connected: ${joinedId}`);
+  if (!event.data.includes('|')) return;
+
+  const parts = event.data.split('|');
+  const msg_type = parts[0];
+  const sender = parts[1];
+  const target = parts[2];
+  const payload = parts[3];
+
+  if (msg_type === "NEWPEER" && sender !== peerId) {
+    log(`Peer connected: ${sender}`);
     return;
   }
-  if (event.data.startsWith("DISCONNECTED|")) {
-    const leftId = event.data.split("|")[1];
-    log(`Client disconnected: ${leftId}`);
-    if (peerConnections[leftId]) {
-      peerConnections[leftId].close();
-      delete peerConnections[leftId];
+
+  if (msg_type === "DISPOSE" && sender !== peerId) {
+    log(`Peer disconnected: ${sender}`);
+    if (peerConnections[sender]) {
+      peerConnections[sender].close();
+      delete peerConnections[sender];
     }
-    const vid = document.getElementById("remote-" + leftId);
+    const vid = document.getElementById("remote-" + sender);
     if (vid) vid.remove();
     return;
   }
 
-  const parts = event.data.split("|", 4);
-  if (parts.length < 4) return;
-  const [type, sender, target, payload] = parts;
+  if (target !== peerId) return;
 
-  if (type === "OFFER" && target === peerId) {
+  if (msg_type === "OFFER") {
     await handleOffer(sender, payload);
-  } else if (type === "ANSWER" && target === peerId) {
+  } else if (msg_type === "ANSWER") {
     await handleAnswer(sender, payload);
-  } else if (type === "CANDIDATE" && target === peerId) {
+  } else if (msg_type === "CANDIDATE") {
     await handleCandidate(sender, payload);
   }
 };
-
+ 
 function createPeerConnection(remotePeerId) {
   log(`Creating connection with ${remotePeerId}`);
   const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
   peerConnections[remotePeerId] = pc;
-
+ 
   // Add local tracks
   if (localStream) {
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
   }
-
+ 
   // ICE
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
     }
   };
-
+ 
   // Remote track
   pc.ontrack = (event) => {
     log(`Remote stream from ${remotePeerId}`);
@@ -105,15 +110,15 @@ function createPeerConnection(remotePeerId) {
     }
     video.srcObject = event.streams[0];
   };
-
+ 
   // Data channel
   const dc = pc.createDataChannel("dataChannel");
   dc.onmessage = (e) => log(`Data from ${remotePeerId}: ${e.data}`);
   dataChannels[remotePeerId] = dc;
-
+ 
   return pc;
 }
-
+ 
 async function handleOffer(sender, payload) {
   const pc = createPeerConnection(sender);
   const offer = JSON.parse(payload);
@@ -122,21 +127,21 @@ async function handleOffer(sender, payload) {
   await pc.setLocalDescription(answer);
   ws.send(`ANSWER|${peerId}|${sender}|${JSON.stringify(answer)}`);
 }
-
+ 
 async function handleAnswer(sender, payload) {
   const pc = peerConnections[sender];
   if (!pc) return;
   const answer = JSON.parse(payload);
   await pc.setRemoteDescription(new RTCSessionDescription(answer));
 }
-
+ 
 async function handleCandidate(sender, payload) {
   const pc = peerConnections[sender];
   if (!pc) return;
   const candidate = JSON.parse(payload);
   await pc.addIceCandidate(new RTCIceCandidate(candidate));
 }
-
+ 
 // Start stream from file
 document.getElementById("startBtn").onclick = async () => {
   const file = document.getElementById("fileInput").files[0];
@@ -147,10 +152,10 @@ document.getElementById("startBtn").onclick = async () => {
   const video = document.getElementById("localVideo");
   video.src = URL.createObjectURL(file);
   await video.play();
-
+ 
   localStream = video.captureStream();
   log("Local stream ready");
-
+ 
   // Send offer to all connected peers
   for (const remotePeerId in peerConnections) {
     const pc = peerConnections[remotePeerId];
