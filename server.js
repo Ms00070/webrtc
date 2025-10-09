@@ -7,7 +7,7 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Serve static files from the "public" directory
+// Serve static files from "public"
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Create HTTP server
@@ -16,122 +16,60 @@ const server = http.createServer(app);
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
 
-// Store connected clients with their peer IDs
+// Store connected clients { peerId: ws }
 const clients = new Map();
 
-// Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('Client connected');
   let clientPeerId = null;
-  
-  // Handle messages from clients
+
   ws.on('message', (message) => {
     const messageStr = message.toString();
-    console.log(`Received message: ${messageStr}`);
-    
+    console.log(`Received: ${messageStr}`);
     try {
-      // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
       const parts = messageStr.split('|');
       const type = parts[0];
       const senderId = parts[1];
       const receiverId = parts[2];
-      const msgContent = parts[3];
-      const connectionCount = parts[4] || '0';
-      const isVideoAudioSender = parts[5] || 'false';
-      
-      // Register client with its ID when it announces itself
+
       if (type === 'NEWPEER') {
         clientPeerId = senderId;
         clients.set(senderId, ws);
-        console.log(`Registered client with ID: ${senderId}`);
-        
-        // Broadcast to all clients
+        console.log(`Registered ${senderId}`);
         broadcastMessage(messageStr, ws);
-      } 
-      // Handle peer-to-peer messages
-      else if (receiverId && receiverId !== 'ALL') {
-        // Ensure message has complete format
-        let completeMessage = messageStr;
-        const parts = messageStr.split('|');
-        if (parts.length < 6) {
-          // Add missing parts with default values
-          while (parts.length < 4) {
-            parts.push(''); // Add empty strings for missing required parts
-          }
-          if (parts.length === 4) {
-            parts.push('0'); // Add default connection count
-          }
-          if (parts.length === 5) {
-            parts.push('false'); // Add default isVideoAudioSender flag
-          }
-          completeMessage = parts.join('|');
+      } else if (receiverId && receiverId !== 'ALL') {
+        const target = clients.get(receiverId);
+        if (target && target.readyState === WebSocket.OPEN) {
+          target.send(messageStr);
         }
-        
-        // Send to specific client
-        const targetClient = clients.get(receiverId);
-        if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-          console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
-          targetClient.send(completeMessage);
-        } else {
-          console.log(`Target client ${receiverId} not found or not connected`);
-        }
-      }
-      // Handle broadcast messages
-      else if (receiverId === 'ALL') {
-        // Broadcast to all clients except sender
+      } else if (receiverId === 'ALL') {
         broadcastMessage(messageStr, ws);
       }
     } catch (err) {
       console.error('Error processing message:', err);
     }
   });
-  
-  // Handle client disconnections
+
   ws.on('close', () => {
     if (clientPeerId) {
       console.log(`Client ${clientPeerId} disconnected`);
       clients.delete(clientPeerId);
-      
-      // Notify other clients about disconnection
       const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
       broadcastMessage(disconnectMsg, null);
-    } else {
-      console.log('Unknown client disconnected');
     }
   });
-  
-  // Handle errors
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-  });
+
+  ws.on('error', (err) => console.error('WebSocket error:', err));
 });
 
-// Function to broadcast a message to all clients except the sender
-function broadcastMessage(message, excludeClient) {
-  // Ensure message has all 6 parts required by SimpleWebRTC
-  const parts = message.split('|');
-  if (parts.length < 6) {
-    // Add missing parts with default values
-    while (parts.length < 4) {
-      parts.push(''); // Add empty strings for missing required parts
-    }
-    if (parts.length === 4) {
-      parts.push('0'); // Add default connection count
-    }
-    if (parts.length === 5) {
-      parts.push('false'); // Add default isVideoAudioSender flag
-    }
-    message = parts.join('|');
-  }
-  
+function broadcastMessage(message, exclude) {
   wss.clients.forEach((client) => {
-    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
+    if (client !== exclude && client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
   });
 }
 
-// Start the server
 server.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Signaling server running on port ${port}`);
 });
