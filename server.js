@@ -1,45 +1,65 @@
 // server.js
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const WebSocket = require('ws');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const PORT = process.env.PORT || 8080;
+const wss = new WebSocket.Server({ port: PORT });
 
-const peers = {}; // Store peer connections
+console.log(`WebSocket signaling server running on ws://localhost:${PORT} or deployed URL`);
 
-io.on('connection', socket => {
-  console.log(`Peer connected: ${socket.id}`);
+const peers = new Map(); // key: peerId, value: ws connection
 
-  socket.on('join', ({ peerId }) => {
-    peers[peerId] = socket.id;
-    console.log(`${peerId} joined`);
-  });
+wss.on('connection', ws => {
+  ws.on('message', message => {
+    const msgStr = message.toString();
+    // All messages are plain text in your format: TYPE|SENDER|RECEIVER|MSG|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
+    const parts = msgStr.split('|');
+    const type = parts[0];
+    const senderId = parts[1];
+    const receiverId = parts[2];
 
-  socket.on('offer', ({ to, sdp }) => {
-    if (peers[to]) io.to(peers[to]).emit('offer', { from: socket.id, sdp });
-  });
-
-  socket.on('answer', ({ to, sdp }) => {
-    if (peers[to]) io.to(peers[to]).emit('answer', { from: socket.id, sdp });
-  });
-
-  socket.on('candidate', ({ to, candidate }) => {
-    if (peers[to]) io.to(peers[to]).emit('candidate', { from: socket.id, candidate });
-  });
-
-  socket.on('leave', ({ peerId }) => {
-    delete peers[peerId];
-    console.log(`${peerId} left`);
-  });
-
-  socket.on('disconnect', () => {
-    for (const [id, sid] of Object.entries(peers)) {
-      if (sid === socket.id) delete peers[id];
+    if (type === 'NEWPEER') {
+      peers.set(senderId, ws);
+      console.log(`New peer connected: ${senderId}`);
+      // Send NEWPEERACK to all other peers
+      broadcast(`NEWPEERACK|Server|ALL|Peer ${senderId} joined|0|false`, senderId);
+      return;
     }
-    console.log(`Peer disconnected: ${socket.id}`);
+
+    if (type === 'DISPOSE') {
+      peers.delete(senderId);
+      console.log(`Peer disconnected: ${senderId}`);
+      broadcast(`DISPOSE|${senderId}|ALL|Peer disconnected|0|false`);
+      return;
+    }
+
+    // Relay other messages to the intended receiver(s)
+    if (receiverId === 'ALL') {
+      broadcast(msgStr, senderId);
+    } else {
+      const dest = peers.get(receiverId);
+      if (dest && dest.readyState === WebSocket.OPEN) {
+        dest.send(msgStr);
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    // Remove from peers map if a connection closes unexpectedly
+    for (const [id, socket] of peers.entries()) {
+      if (socket === ws) {
+        peers.delete(id);
+        console.log(`Peer connection closed: ${id}`);
+        broadcast(`DISPOSE|${id}|ALL|Peer disconnected|0|false`);
+      }
+    }
   });
 });
 
-server.listen(3000, () => console.log('SFU server running on port 3000'));
+// Broadcast to all peers except sender
+function broadcast(message, senderId) {
+  for (const [id, socket] of peers.entries()) {
+    if (id !== senderId && socket.readyState === WebSocket.OPEN) {
+      socket.send(message);
+    }
+  }
+}
