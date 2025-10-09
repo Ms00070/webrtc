@@ -11,7 +11,7 @@
   </style>
 </head>
 <body>
-  <h2>WebRTC Streamer</h2>
+  <h2>WebRTC Streamer 12</h2>
   <input type="file" id="fileInput" accept="video/*">
   <button id="startBtn">Start Stream</button>
  
@@ -94,7 +94,8 @@ function createPeerConnection(remotePeerId) {
         username: "openrelayproject",
         credential: "openrelayproject"
       }
-    ] 
+    ],
+    iceTransportPolicy: "relay" // Force the use of TURN
   });
   peerConnections[remotePeerId] = pc;
  
