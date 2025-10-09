@@ -1,54 +1,123 @@
-const express = require("express");
-const http = require("http");
-const WebSocket = require("ws");
-const path = require("path");
-
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const path = require('path');
+ 
+// Create Express app
 const app = express();
 const port = process.env.PORT || 3000;
-
-app.use(express.static(path.join(__dirname, "public")));
-
+ 
+// Serve static files from the "public" directory
+app.use(express.static(path.join(__dirname, 'public')));
+ 
+// Create HTTP server
 const server = http.createServer(app);
+ 
+// Create WebSocket server
 const wss = new WebSocket.Server({ server });
-
+ 
+// Store connected clients with their peer IDs
 const clients = new Map();
-
-wss.on("connection", (ws) => {
-  console.log("Client connected");
-  let clientId = null;
-
-  ws.on("message", (data) => {
+ 
+// Handle WebSocket connections
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+  let clientPeerId = null;
+ 
+  // Handle messages from clients
+  ws.on('message', (message) => {
+    const messageStr = message.toString();
+    console.log(`Received message: ${messageStr}`);
+ 
     try {
-      const msg = JSON.parse(data);
-      if (msg.type === "hello") {
-        clientId = "peer_" + Date.now();
-        clients.set(clientId, ws);
-        console.log("Registered:", clientId);
-        return;
+      // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
+      const parts = messageStr.split('|');
+      const type = parts[0];
+      const senderId = parts[1];
+      const receiverId = parts[2];
+      const msgContent = parts[3];
+      const connectionCount = parts[4] || '0';
+      const isVideoAudioSender = parts[5] || 'false';
+ 
+      // Register client with its ID when it announces itself
+      if (type === 'NEWPEER') {
+        clientPeerId = senderId;
+        clients.set(senderId, ws);
+        console.log(`Registered client with ID: ${senderId}`);
+ 
+        // Broadcast to all clients
+        broadcastMessage(messageStr, ws);
       }
-
-      // relay to specific peer
-      if (msg.to && clients.has(msg.to)) {
-        clients.get(msg.to).send(JSON.stringify({ ...msg, from: clientId }));
+      // Handle peer-to-peer messages
+      else if (receiverId && receiverId !== 'ALL') {
+        // Ensure message has complete format
+        let completeMessage = messageStr;
+        const p = messageStr.split('|');
+        if (p.length < 6) {
+          while (p.length < 4) p.push('');
+          if (p.length === 4) p.push('0');
+          if (p.length === 5) p.push('false');
+          completeMessage = p.join('|');
+        }
+ 
+        // Send to specific client
+        const targetClient = clients.get(receiverId);
+        if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+          console.log(`Sending ${type} from ${senderId} to ${receiverId}`);
+          targetClient.send(completeMessage);
+        } else {
+          console.log(`Target client ${receiverId} not found or not connected`);
+        }
       }
-
-      // broadcast
-      if (msg.type === "broadcast") {
-        clients.forEach((client, id) => {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ ...msg, from: clientId }));
-          }
-        });
+      // Handle broadcast messages
+      else if (receiverId === 'ALL') {
+        // Broadcast to all clients except sender
+        broadcastMessage(messageStr, ws);
       }
     } catch (err) {
-      console.error("Message error:", err);
+      console.error('Error processing message:', err);
     }
   });
-
-  ws.on("close", () => {
-    console.log("Disconnected:", clientId);
-    if (clientId) clients.delete(clientId);
+ 
+  // Handle client disconnections
+  ws.on('close', () => {
+    if (clientPeerId) {
+      console.log(`Client ${clientPeerId} disconnected`);
+      clients.delete(clientPeerId);
+ 
+      // Notify other clients about disconnection
+      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
+      broadcastMessage(disconnectMsg, null);
+    } else {
+      console.log('Unknown client disconnected');
+    }
+  });
+ 
+  // Handle errors
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 });
-
-server.listen(port, () => console.log(`Server running on port ${port}`));
+ 
+// Function to broadcast a message to all clients except the sender
+function broadcastMessage(message, excludeClient) {
+  // Ensure message has all 6 parts required
+  const parts = message.split('|');
+  if (parts.length < 6) {
+    while (parts.length < 4) parts.push('');
+    if (parts.length === 4) parts.push('0');
+    if (parts.length === 5) parts.push('false');
+    message = parts.join('|');
+  }
+ 
+  wss.clients.forEach((client) => {
+    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+ 
+// Start the server
+server.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
