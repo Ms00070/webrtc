@@ -124,8 +124,8 @@
     
     // WebRTC variables
     let localStream;
-    let peerConnection;
-    let dataChannel;
+    const peerConnections = {}; // peerId -> RTCPeerConnection
+    const dataChannels = {};    // peerId -> data channel
     let ws;
     let peerId;
 
@@ -259,8 +259,8 @@
       switch (type) {
         case 'NEWPEER':
         case 'NEWPEERACK':
-          if (!peerConnection) createPeerConnection(senderId);
-          break;
+            if (!peerConnections[senderId]) createPeerConnection(senderId);
+            break;
         case 'OFFER':
           if (senderId !== peerId) handleOffer(senderId, msgContent);
           break;
@@ -281,41 +281,78 @@
       }
     }
 
+    // function createPeerConnection(remotePeerId) {
+    //   log(`Creating connection with ${remotePeerId}`);
+    //   const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    //   peerConnection = new RTCPeerConnection(configuration);
+
+    //   dataChannel = peerConnection.createDataChannel('dataChannel');
+    //   setupDataChannel(dataChannel);
+
+    //   if (localStream) {
+    //     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    //   }
+
+    //   peerConnection.onicecandidate = (event) => {
+    //     if (event.candidate) {
+    //       const candidateObj = {
+    //         sdpMid: event.candidate.sdpMid,
+    //         sdpMLineIndex: event.candidate.sdpMLineIndex,
+    //         candidate: event.candidate.candidate
+    //       };
+    //       ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(candidateObj)}`);
+    //     }
+    //   };
+
+    //   peerConnection.oniceconnectionstatechange = () => log(`ICE state: ${peerConnection.iceConnectionState}`);
+    //   peerConnection.ontrack = (event) => {
+    //     log('Received remote track');
+    //     //remoteVideo.srcObject = event.streams[0];
+    //   };
+    //   peerConnection.ondatachannel = (event) => {
+    //     log('Received data channel');
+    //     setupDataChannel(event.channel);
+    //   };
+
+    //   createOffer(remotePeerId);
+    // }
+
     function createPeerConnection(remotePeerId) {
-      log(`Creating connection with ${remotePeerId}`);
-      const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-      peerConnection = new RTCPeerConnection(configuration);
+        if (peerConnections[remotePeerId]) return; // already exists
 
-      dataChannel = peerConnection.createDataChannel('dataChannel');
-      setupDataChannel(dataChannel);
+        log(`Creating connection with ${remotePeerId}`);
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
-      if (localStream) {
-        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-      }
+        // data channel
+        const dc = pc.createDataChannel('dataChannel');
+        setupDataChannel(dc);
+        dataChannels[remotePeerId] = dc;
 
-      peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-          const candidateObj = {
-            sdpMid: event.candidate.sdpMid,
-            sdpMLineIndex: event.candidate.sdpMLineIndex,
-            candidate: event.candidate.candidate
-          };
-          ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(candidateObj)}`);
+        // add local tracks
+        if (localStream) {
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
         }
-      };
 
-      peerConnection.oniceconnectionstatechange = () => log(`ICE state: ${peerConnection.iceConnectionState}`);
-      peerConnection.ontrack = (event) => {
-        log('Received remote track');
-        //remoteVideo.srcObject = event.streams[0];
-      };
-      peerConnection.ondatachannel = (event) => {
-        log('Received data channel');
-        setupDataChannel(event.channel);
-      };
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+            ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
+            }
+        };
 
-      createOffer(remotePeerId);
-    }
+        pc.ontrack = (event) => {
+            log(`Received remote track from ${remotePeerId}`);
+        };
+
+        pc.ondatachannel = (event) => {
+            setupDataChannel(event.channel);
+        };
+
+        peerConnections[remotePeerId] = pc;
+
+        // create and send offer
+        createOffer(remotePeerId);
+        }
+
 
     async function createOffer(remotePeerId) {
       try {
