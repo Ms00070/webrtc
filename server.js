@@ -1,87 +1,74 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const path = require('path');
+// server.js
+const express = require("express");
+const http = require("http");
+const { Server } = require("ws");
+const { RTCPeerConnection } = require("wrtc");
+const path = require("path");
 
 const app = express();
-const port = process.env.PORT || 3000;
-
-// Serve static files from "public"
-app.use(express.static(path.join(__dirname, 'public')));
-
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new Server({ server });
 
-// Store clients by ID
-const clients = new Map();
+app.use(express.static(path.join(__dirname, "public")));
 
-wss.on('connection', (ws) => {
-  console.log('Client connected');
-  let clientPeerId = null;
+let broadcaster = null;
+const viewers = new Map();
 
-  ws.on('message', (message) => {
-    const messageStr = message.toString();
-    console.log(`Received: ${messageStr}`);
+wss.on("connection", (ws) => {
+  console.log("New WebSocket connection");
 
-    try {
-      // Format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
-      const parts = messageStr.split('|');
-      const type = parts[0];
-      const senderId = parts[1];
-      const receiverId = parts[2];
+  ws.on("message", async (message) => {
+    const msg = JSON.parse(message);
 
-      // Register new client
-      if (type === 'NEWPEER') {
-        clientPeerId = senderId;
-        clients.set(senderId, ws);
-        console.log(`Registered ${senderId}`);
+    if (msg.type === "broadcaster") {
+      console.log("Broadcaster connected");
+      broadcaster = { ws, pc: new RTCPeerConnection() };
 
-        // Notify everyone (broadcast presence)
-        broadcastMessage(messageStr, ws);
-      } 
-      // Forward directly if target known
-      else if (receiverId && receiverId !== 'ALL') {
-        const targetClient = clients.get(receiverId);
-        if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-          console.log(`Forwarding ${type} from ${senderId} to ${receiverId}`);
-          targetClient.send(messageStr);
-        } else {
-          console.log(`Target ${receiverId} not found or not connected`);
-        }
-      } 
-      // Broadcast to all
-      else if (receiverId === 'ALL') {
-        broadcastMessage(messageStr, ws);
-      }
-    } catch (err) {
-      console.error('Error processing message:', err);
+      broadcaster.pc.onicecandidate = ({ candidate }) => {
+        if (candidate) ws.send(JSON.stringify({ type: "candidate", candidate }));
+      };
+
+      await broadcaster.pc.setRemoteDescription(msg.offer);
+      const answer = await broadcaster.pc.createAnswer();
+      await broadcaster.pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", answer }));
+    }
+
+    if (msg.type === "viewer") {
+      console.log("Viewer connected");
+      const viewerPC = new RTCPeerConnection();
+      viewers.set(ws, viewerPC);
+
+      // Forward all broadcaster tracks to viewer
+      broadcaster.pc.getSenders().forEach((sender) => {
+        if (sender.track) viewerPC.addTrack(sender.track);
+      });
+
+      viewerPC.onicecandidate = ({ candidate }) => {
+        if (candidate) ws.send(JSON.stringify({ type: "candidate", candidate }));
+      };
+
+      await viewerPC.setRemoteDescription(msg.offer);
+      const answer = await viewerPC.createAnswer();
+      await viewerPC.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", answer }));
+    }
+
+    if (msg.type === "candidate") {
+      const candidate = new RTCIceCandidate(msg.candidate);
+      if (broadcaster && ws === broadcaster.ws)
+        broadcaster.pc.addIceCandidate(candidate);
+      else if (viewers.has(ws))
+        viewers.get(ws).addIceCandidate(candidate);
     }
   });
 
-  ws.on('close', () => {
-    if (clientPeerId) {
-      console.log(`Client ${clientPeerId} disconnected`);
-      clients.delete(clientPeerId);
-
-      // Notify others
-      const disconnectMsg = `DISPOSE|${clientPeerId}|ALL|Remove peerConnection for ${clientPeerId}.|0|false`;
-      broadcastMessage(disconnectMsg, null);
-    }
-  });
-
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
+  ws.on("close", () => {
+    console.log("Client disconnected");
+    if (broadcaster && ws === broadcaster.ws) broadcaster = null;
+    viewers.delete(ws);
   });
 });
 
-function broadcastMessage(message, excludeClient) {
-  wss.clients.forEach((client) => {
-    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
-}
-
-server.listen(port, () => {
-  console.log(`🚀 Signaling server running on ws://localhost:${port}`);
-});
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`SFU running on port ${PORT}`));
