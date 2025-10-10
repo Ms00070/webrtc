@@ -1,3 +1,25 @@
+/**
+ * WebRTC Signaling Server
+ * 
+ * This server handles WebSocket connections for WebRTC signaling, supporting both
+ * peer-to-peer and Selective Forwarding Unit (SFU) modes for video broadcasting.
+ * 
+ * Recent improvements:
+ * - Added TURN server configuration to the client for better NAT traversal
+ * - Implemented WebSocket reconnection logic with exponential backoff
+ * - Added connection state monitoring and visual indicators
+ * - Improved error handling and user feedback
+ * - ICE connection monitoring with status feedback
+ * 
+ * The server supports:
+ * - Peer discovery and registration
+ * - Signaling for WebRTC negotiation (offer/answer/ICE candidates)
+ * - Message relay between peers
+ * - Broadcaster/subscriber model for one-to-many streaming
+ * 
+ * Public deployment: https://webrtc-9gdy.onrender.com
+ */
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');

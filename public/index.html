@@ -137,6 +137,19 @@
     let dataChannels = {};
     let subscribedTo = new Set();
     let isBroadcaster = false;
+    let wsReconnectAttempts = 0;
+    let wsReconnectTimeout;
+    let connectionStatus = document.createElement('div');
+    connectionStatus.className = 'connection-status';
+    connectionStatus.style.position = 'fixed';
+    connectionStatus.style.bottom = '20px';
+    connectionStatus.style.right = '20px';
+    connectionStatus.style.padding = '10px';
+    connectionStatus.style.borderRadius = '5px';
+    connectionStatus.style.color = 'white';
+    connectionStatus.style.fontWeight = 'bold';
+    connectionStatus.style.zIndex = '1000';
+    document.body.appendChild(connectionStatus);
     
     // Handle tab switching
     tabs.forEach(tab => {
@@ -203,13 +216,23 @@
       const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       const wsUrl = `${protocol}${window.location.host}`;
       
+      updateConnectionStatus('connecting', 'Connecting to signaling server...');
+      
+      // Clear any existing reconnection timeout
+      if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
+      }
+      
       ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
         log('Connected to signaling server');
+        updateConnectionStatus('connected', 'Connected to signaling server');
         connectBtn.disabled = true;
         disconnectBtn.disabled = false;
         startStreamBtn.disabled = false;
+        wsReconnectAttempts = 0;
         
         ws.send(`NEWPEER|${currentPeerId}|ALL|${modeSelect.value}|0|${modeSelect.value === 'broadcaster'}`);
         
@@ -221,46 +244,121 @@
         setInterval(checkAndFixRemoteVideo, 3000);
       };
       
-      ws.onclose = () => {
-        log('Disconnected from signaling server', true);
-        cleanupWebRTC();
+      ws.onclose = (event) => {
+        log(`Disconnected from signaling server (code: ${event.code})`, true);
+        updateConnectionStatus('disconnected', 'Disconnected from signaling server');
+        
+        if (wsReconnectAttempts < 5) {
+          const delay = Math.min(1000 * (Math.pow(2, wsReconnectAttempts)), 30000);
+          log(`Attempting to reconnect in ${delay/1000} seconds...`);
+          updateConnectionStatus('reconnecting', `Reconnecting in ${delay/1000}s (attempt ${wsReconnectAttempts + 1}/5)`);
+          
+          wsReconnectTimeout = setTimeout(() => {
+            wsReconnectAttempts++;
+            connectToSignalingServer();
+          }, delay);
+        } else {
+          log('Maximum reconnection attempts reached. Please reconnect manually.');
+          cleanupWebRTC();
+        }
+      };
+      
+      ws.onerror = (error) => {
+        log('WebSocket error occurred', true);
+        console.error('WebSocket error:', error);
       };
       
       ws.onmessage = (event) => handleSignalingMessage(event.data);
     }
+    
+    function updateConnectionStatus(status, message) {
+      switch (status) {
+        case 'connecting':
+          connectionStatus.style.backgroundColor = '#FFA500'; // Orange
+          break;
+        case 'connected':
+          connectionStatus.style.backgroundColor = '#4CAF50'; // Green
+          break;
+        case 'disconnected':
+          connectionStatus.style.backgroundColor = '#F44336'; // Red
+          break;
+        case 'reconnecting':
+          connectionStatus.style.backgroundColor = '#FF9800'; // Amber
+          break;
+        default:
+          connectionStatus.style.backgroundColor = '#9E9E9E'; // Grey
+      }
+      connectionStatus.textContent = message;
+    }
 
     function disconnect() {
-      if (ws) {
-        ws.send(`DISPOSE|${currentPeerId}|ALL|Remove peerConnection for ${currentPeerId}.|0|false`);
-        ws.close();
+      // Clear any reconnection attempts
+      if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
       }
+      wsReconnectAttempts = 0;
+      
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(`DISPOSE|${currentPeerId}|ALL|Remove peerConnection for ${currentPeerId}.|0|false`);
+          ws.close();
+        } catch (e) {
+          console.error('Error during disconnect:', e);
+        }
+      }
+      
+      updateConnectionStatus('disconnected', 'Disconnected');
       cleanupWebRTC();
     }
     
     function cleanupWebRTC() {
+      // Stop all media tracks
       if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
+        localStream.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch (e) {
+            console.error('Error stopping track:', e);
+          }
+        });
         localStream = null;
       }
       
+      // Close all peer connections
       for (const peerId in peerConnections) {
-        if (peerConnections[peerId]) {
-          peerConnections[peerId].close();
+        try {
+          if (peerConnections[peerId]) {
+            peerConnections[peerId].close();
+          }
+        } catch (e) {
+          console.error(`Error closing peer connection with ${peerId}:`, e);
         }
       }
       
+      // Clear all collections
       peerConnections = {};
       dataChannels = {};
       subscribedTo.clear();
       
+      // Reset UI elements
       connectBtn.disabled = false;
       disconnectBtn.disabled = true;
       startStreamBtn.disabled = true;
       stopStreamBtn.disabled = true;
       sendDataBtn.disabled = true;
-      localVideo.srcObject = null;
+      
+      // Clear media elements
+      try {
+        localVideo.srcObject = null;
+      } catch (e) {
+        console.error('Error clearing localVideo:', e);
+      }
+      
       remoteVideos.innerHTML = '';
       broadcasterList.innerHTML = '<p>No broadcasters available. Connect to server first.</p>';
+      
+      log('WebRTC connections cleaned up');
     }
     
     async function startBroadcasting() {
@@ -405,12 +503,75 @@
     
     function createPeerConnectionForBroadcaster(broadcasterId) {
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { 
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
+        ]
       });
       
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           ws.send(`CANDIDATE|${currentPeerId}|${broadcasterId}|${JSON.stringify(event.candidate)}`);
+        }
+      };
+      
+      // Monitor ICE connection state
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state with ${broadcasterId}: ${pc.iceConnectionState}`);
+        const statusEl = document.getElementById(`connection-status-${broadcasterId}`) || 
+                        document.createElement('div');
+        
+        if (!statusEl.id) {
+          statusEl.id = `connection-status-${broadcasterId}`;
+          statusEl.className = 'ice-connection-status';
+          statusEl.style.padding = '5px';
+          statusEl.style.fontSize = '12px';
+          statusEl.style.borderRadius = '3px';
+          statusEl.style.textAlign = 'center';
+          statusEl.style.margin = '5px 0';
+          const container = document.getElementById(`remote-container-${broadcasterId}`);
+          if (container) {
+            container.appendChild(statusEl);
+          }
+        }
+        
+        switch(pc.iceConnectionState) {
+          case 'checking':
+            statusEl.style.backgroundColor = '#FFF59D'; // Light yellow
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connecting...';
+            break;
+          case 'connected':
+          case 'completed':
+            statusEl.style.backgroundColor = '#A5D6A7'; // Light green
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connected';
+            break;
+          case 'failed':
+            statusEl.style.backgroundColor = '#EF9A9A'; // Light red
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connection failed - try refreshing';
+            break;
+          case 'disconnected':
+            statusEl.style.backgroundColor = '#FFCC80'; // Light orange
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Disconnected - attempting to reconnect';
+            break;
+          case 'closed':
+            statusEl.style.backgroundColor = '#E0E0E0'; // Light gray
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connection closed';
+            break;
         }
       };
       
@@ -435,6 +596,20 @@
           container.appendChild(videoEl);
           container.appendChild(label);
           remoteVideos.appendChild(container);
+          
+          // Add status indicator
+          const statusEl = document.createElement('div');
+          statusEl.id = `connection-status-${broadcasterId}`;
+          statusEl.className = 'ice-connection-status';
+          statusEl.style.padding = '5px';
+          statusEl.style.fontSize = '12px';
+          statusEl.style.borderRadius = '3px';
+          statusEl.style.textAlign = 'center';
+          statusEl.style.margin = '5px 0';
+          statusEl.style.backgroundColor = '#FFF59D'; // Light yellow
+          statusEl.style.color = 'black';
+          statusEl.textContent = 'Connecting...';
+          container.appendChild(statusEl);
         }
         
         if (!videoEl.srcObject) {
@@ -442,7 +617,9 @@
         }
         
         videoEl.srcObject.addTrack(event.track);
-        videoEl.play().catch(e => {});
+        videoEl.play().catch(e => {
+          log(`Error playing video: ${e.message}`, true);
+        });
       };
       
       const dc = pc.createDataChannel(`data-${broadcasterId}`);
@@ -462,12 +639,60 @@
     
     function createPeerConnectionForSubscriber(subscriberId) {
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { 
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
+        ]
       });
       
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           ws.send(`CANDIDATE|${currentPeerId}|${subscriberId}|${JSON.stringify(event.candidate)}`);
+        }
+      };
+      
+      // Monitor ICE connection state
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state with subscriber ${subscriberId}: ${pc.iceConnectionState}`);
+        
+        // Update broadcaster UI about connection status if needed
+        if (isBroadcaster) {
+          // You could add UI elements to show subscriber connection status
+          switch(pc.iceConnectionState) {
+            case 'connected':
+            case 'completed':
+              log(`Subscriber ${subscriberId} connected successfully`);
+              break;
+            case 'failed':
+              log(`Connection with subscriber ${subscriberId} failed`, true);
+              break;
+            case 'disconnected':
+              log(`Subscriber ${subscriberId} disconnected - attempting to reconnect`);
+              break;
+          }
+        }
+      };
+      
+      // Monitor connection state
+      pc.onconnectionstatechange = () => {
+        log(`Connection state with ${subscriberId}: ${pc.connectionState}`);
+        if (pc.connectionState === 'failed') {
+          log(`Connection with ${subscriberId} failed permanently. Cleaning up.`, true);
+          // Consider cleaning up this peer connection and potentially retrying
+          setTimeout(() => {
+            removePeerConnection(subscriberId);
+            // Optionally recreate connection after a delay
+          }, 5000);
         }
       };
       
@@ -479,6 +704,20 @@
       
       pc.ondatachannel = (event) => {
         dataChannels[subscriberId] = event.channel;
+        // Set up data channel event handlers
+        const channel = event.channel;
+        channel.onmessage = (e) => {
+          log(`Data message from ${subscriberId}: ${e.data}`);
+          // Handle data messages from subscriber
+        };
+        
+        channel.onopen = () => {
+          log(`Data channel with ${subscriberId} opened`);
+        };
+        
+        channel.onclose = () => {
+          log(`Data channel with ${subscriberId} closed`);
+        };
       };
       
       peerConnections[subscriberId] = pc;
