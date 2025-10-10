@@ -234,18 +234,8 @@
         startStreamBtn.disabled = false;
         wsReconnectAttempts = 0;
        
-        ws.send(`NEWPEER|${currentPeerId}|ALL|${modeSelect.value}|0|${modeSelect.value === 'broadcaster'}`);
-       
-        if (modeSelect.value === 'broadcaster') {
-          ws.send(`BROADCAST_REGISTER|${currentPeerId}|ALL|New broadcaster available|0|true`);
-          isBroadcaster = true;
-        }
-       
-        setInterval(checkAndFixRemoteVideo, 3000);
-      };
-     
-      ws.onclose = (event) => {
-        log(`Disconnected from signaling server (code: ${event.code})`, true);
+        // Delay sending WebSocket messages to ensure connection is fully established
+        setTimeout(() => {
         updateConnectionStatus('disconnected', 'Disconnected from signaling server');
        
         if (wsReconnectAttempts < 5) {
