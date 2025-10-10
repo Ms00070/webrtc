@@ -133,7 +133,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>WebRTC SFU Demo</h1>
+    <h1>WebRTC SFU Demo 1111</h1>
     
     <div class="tabs">
       <div class="tab active" data-tab="settings">Settings</div>
@@ -511,7 +511,11 @@
     
     function handleNewPeer(peerId, info, isVideoSender) {
       if (peerId === currentPeerId) return;
-      
+
+      if (peerId.startsWith('PythonReceiver')) {
+        log(`✅ Python receiver connected: ${peerId}`);
+      }
+
       // Check if it's a broadcaster
       if (isVideoSender || info.includes('broadcaster')) {
         handleBroadcasterAvailable(peerId);
