@@ -1,185 +1,48 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>WebRTC Streamer</title>
-  <style>
-    body { font-family: Arial, sans-serif; background: #f2f2f2; }
-    #log { background: #000; color: #0f0; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; }
-    video { width: 300px; margin: 10px; border: 2px solid #333; }
-    button { padding: 10px 20px; margin-top: 10px; }
-  </style>
-</head>
-<body>
-  <h2>WebRTC Streamer 12</h2>
-  <input type="file" id="fileInput" accept="video/*">
-  <button id="startBtn">Start Stream</button>
- 
-  <h3>Logs</h3>
-  <div id="log"></div>
- 
-  <h3>Local Video</h3>
-  <video id="localVideo" autoplay controls></video>
- 
-  <h3>Remote Videos</h3>
-  <div id="remoteVideos"></div>
- 
-<script>
-const ws = new WebSocket("wss://webrtc-9gdy.onrender.com/"); // Changed to the correct server
-const peerId = "WebClient-" + Math.floor(Math.random()*10000);
- 
-const peerConnections = {};
-const dataChannels = {};
-const knownPeers = new Set();
-let localStream;
- 
-function log(msg) {
-  const logDiv = document.getElementById("log");
-  logDiv.innerHTML += msg + "<br>";
-  logDiv.scrollTop = logDiv.scrollHeight;
-  console.log(msg);
-}
- 
-ws.onopen = () => {
-  log("Connected to signaling server");
-  // Announce self using the pipe-delimited format
-  ws.send(`NEWPEER|${peerId}|ALL|Web client connected|0|false`);
-};
- 
-ws.onmessage = async (event) => {
-  if (!event.data.includes('|')) return;
+<html>
+  <head>
+    <title>SFU Broadcaster</title>
+    <style>
+      body { font-family: sans-serif; text-align: center; }
+      video { width: 70%; border: 2px solid #333; margin: 20px; }
+    </style>
+  </head>
+  <body>
+    <h1>📡 SFU Video Broadcaster</h1>
+    <video id="video" autoplay playsinline muted></video><br>
+    <input id="streamUrl" placeholder="Enter camera URL e.g. http://192.168.0.101:8080/video">
+    <button id="startBtn">Start Stream</button>
 
-  const parts = event.data.split('|');
-  const msg_type = parts[0];
-  const sender = parts[1];
-  const target = parts[2];
-  const payload = parts[3];
+    <script>
+      const ws = new WebSocket(location.origin.replace(/^http/, "ws"));
+      let pc;
 
-  if (msg_type === "NEWPEER" && sender !== peerId) {
-    log(`Peer connected: ${sender}`);
-    knownPeers.add(sender);
-    return;
-  }
+      document.getElementById("startBtn").onclick = async () => {
+        const url = document.getElementById("streamUrl").value;
+        const video = document.getElementById("video");
+        video.src = url;
 
-  if (msg_type === "DISPOSE" && sender !== peerId) {
-    log(`Peer disconnected: ${sender}`);
-    knownPeers.delete(sender);
-    if (peerConnections[sender]) {
-      peerConnections[sender].close();
-      delete peerConnections[sender];
-    }
-    const vid = document.getElementById("remote-" + sender);
-    if (vid) vid.remove();
-    return;
-  }
+        await video.play();
+        const stream = video.captureStream();
 
-  if (target !== peerId) return;
+        pc = new RTCPeerConnection();
+        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
-  if (msg_type === "OFFER") {
-    await handleOffer(sender, payload);
-  } else if (msg_type === "ANSWER") {
-    await handleAnswer(sender, payload);
-  } else if (msg_type === "CANDIDATE") {
-    await handleCandidate(sender, payload);
-  }
-};
- 
-function createPeerConnection(remotePeerId) {
-  log(`Creating connection with ${remotePeerId}`);
-  const pc = new RTCPeerConnection({ 
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelayproject",
-        credential: "openrelayproject"
-      }
-    ],
-    iceTransportPolicy: "relay" // Force the use of TURN
-  });
-  peerConnections[remotePeerId] = pc;
- 
-  // Add local tracks
-  if (localStream) {
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-  }
- 
-  // ICE
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(event.candidate)}`);
-    }
-  };
- 
-  // Remote track
-  pc.ontrack = (event) => {
-    log(`Remote stream from ${remotePeerId}`);
-    let video = document.getElementById("remote-" + remotePeerId);
-    if (!video) {
-      video = document.createElement("video");
-      video.id = "remote-" + remotePeerId;
-      video.autoplay = true;
-      video.controls = true;
-      document.getElementById("remoteVideos").appendChild(video);
-    }
-    video.srcObject = event.streams[0];
-  };
- 
-  // Data channel
-  const dc = pc.createDataChannel("dataChannel");
-  dc.onmessage = (e) => log(`Data from ${remotePeerId}: ${e.data}`);
-  dataChannels[remotePeerId] = dc;
- 
-  return pc;
-}
- 
-async function handleOffer(sender, payload) {
-  const pc = createPeerConnection(sender);
-  const offer = JSON.parse(payload);
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  ws.send(`ANSWER|${peerId}|${sender}|${JSON.stringify(answer)}`);
-}
- 
-async function handleAnswer(sender, payload) {
-  const pc = peerConnections[sender];
-  if (!pc) return;
-  const answer = JSON.parse(payload);
-  await pc.setRemoteDescription(new RTCSessionDescription(answer));
-}
- 
-async function handleCandidate(sender, payload) {
-  const pc = peerConnections[sender];
-  if (!pc) return;
-  const candidate = JSON.parse(payload);
-  await pc.addIceCandidate(new RTCIceCandidate(candidate));
-}
- 
-// Start stream from file
-document.getElementById("startBtn").onclick = async () => {
-  const file = document.getElementById("fileInput").files[0];
-  if (!file) {
-    log("No video file selected");
-    return;
-  }
-  const video = document.getElementById("localVideo");
-  video.src = URL.createObjectURL(file);
-  await video.play();
- 
-  localStream = video.captureStream();
-  log("Local stream ready");
- 
-  // Send offer to all known peers
-  for (const remotePeerId of knownPeers) {
-    if (peerConnections[remotePeerId]) continue; // Don't re-offer
-    const pc = createPeerConnection(remotePeerId);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    ws.send(`OFFER|${peerId}|${remotePeerId}|${JSON.stringify(offer)}`);
-    log(`Sent OFFER to ${remotePeerId}`);
-  }
-};
-</script>
-</body>
+        pc.onicecandidate = ({ candidate }) => {
+          if (candidate) ws.send(JSON.stringify({ type: "candidate", candidate }));
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        ws.send(JSON.stringify({ type: "broadcaster", offer }));
+      };
+
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "answer") await pc.setRemoteDescription(msg.answer);
+        if (msg.type === "candidate") await pc.addIceCandidate(msg.candidate);
+      };
+    </script>
+  </body>
 </html>
