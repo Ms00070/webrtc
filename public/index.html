@@ -14,7 +14,7 @@
     <button id="startBtn">Start Stream</button>
 
     <script>
-      const ws = new WebSocket(location.origin.replace(/^http/, "wss"));
+      const ws = new WebSocket(location.origin.replace(/^http/, "ws"));
       let pc;
 
       document.getElementById("startBtn").onclick = async () => {
