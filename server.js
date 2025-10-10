@@ -106,6 +106,10 @@ wss.on('connection', (ws) => {
           }
         }
       }
+      // Handle media relay for SFU mode
+      else if (type === 'MEDIA') {
+        relayMediaPacket(senderId, receiverId, msgContent, parts[4], parts[5]);
+      }
       // Handle peer-to-peer messages
       else if (receiverId && receiverId !== 'ALL') {
         // Ensure message has complete format
@@ -130,10 +134,6 @@ wss.on('connection', (ws) => {
       else if (receiverId === 'ALL') {
         // Broadcast to all clients except sender
         broadcastMessage(ensureMessageFormat(messageStr), ws);
-      }
-      // Handle media relay for SFU mode
-      else if (type === 'MEDIA') {
-        relayMediaPacket(senderId, receiverId, msgContent, parts[4], parts[5]);
       }
     } catch (err) {
       console.error('Error processing message:', err);
@@ -293,7 +293,7 @@ function deliverPendingMessages(peerId) {
   }
 }
 
-function relayMediaPacket(senderId, mediaType, packet, metadata, encoding) {
+function relayMediaPacket(senderId, receiverId, mediaType, metadata, encoding) {
   // Only handle packets from registered broadcasters
   if (!broadcasters.has(senderId)) return;
   
@@ -309,11 +309,20 @@ function relayMediaPacket(senderId, mediaType, packet, metadata, encoding) {
     }
   }
   
+  // If this is a specific receiver (not ALL), only send to that receiver
+  if (receiverId !== "ALL" && receiverId !== "") {
+    const client = clients.get(receiverId);
+    if (client && client.readyState === WebSocket.OPEN) {
+      client.send(`MEDIA|${senderId}|${receiverId}|${mediaType}|${metadata}|${encoding}`);
+    }
+    return;
+  }
+  
   // Forward media packet to all subscribers
   for (const subId of subscriberList) {
     const client = clients.get(subId);
     if (client && client.readyState === WebSocket.OPEN) {
-      client.send(`MEDIA|${senderId}|${subId}|${mediaType}|${metadata}|${encoding}|${packet}`);
+      client.send(`MEDIA|${senderId}|${subId}|${mediaType}|${metadata}|${encoding}`);
     }
   }
 }
