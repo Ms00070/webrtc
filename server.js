@@ -101,13 +101,25 @@ wss.on('connection', (ws) => {
        
         // If this is a new client (not a video sender), inform them about existing video senders
         if (!isVideoSender) {
-          console.log(`Sending existing video senders to new client ${senderId}`);
+          console.log(`New client ${senderId} joined. Notifying existing video senders.`);
           videoSenders.forEach((sender, senderPeerId) => {
             if (sender.ws.readyState === WebSocket.OPEN) {
-              // Send NEWPEER message from each video sender to the new client
-              const senderAnnouncement = `NEWPEER|${senderPeerId}|${senderId}|Existing video sender|0|true`;
-              ws.send(senderAnnouncement);
-              console.log(`Notified new client ${senderId} about existing video sender ${senderPeerId}`);
+              // Notify the *video sender* about the *new client*
+              const newClientAnnouncement = `NEWPEER|${senderId}|${senderPeerId}|New client joined|0|false`;
+              sender.ws.send(newClientAnnouncement);
+              console.log(`Notified video sender ${senderPeerId} about new client ${senderId}`);
+            }
+          });
+        } else {
+          // If a new video sender joins, notify all existing non-sender clients
+          console.log(`New video sender ${senderId} joined. Notifying existing clients.`);
+          clients.forEach((client, clientId) => {
+            if (clientId !== senderId && !videoSenders.has(clientId)) {
+                if (client.readyState === WebSocket.OPEN) {
+                    const senderAnnouncement = `NEWPEER|${senderId}|${clientId}|New video sender available|0|true`;
+                    client.send(senderAnnouncement);
+                    console.log(`Notified client ${clientId} about new video sender ${senderId}`);
+                }
             }
           });
         }
