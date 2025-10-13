@@ -120,13 +120,16 @@ wss.on('connection', (ws) => {
           console.log(`Target client ${receiverId} not found or not connected, storing message`);
           storePendingMessage(receiverId, completeMessage);
          
-          // For ICE candidates, store them separately for faster recovery
           if (type === 'CANDIDATE') {
             storePendingCandidate(senderId, receiverId, msgContent);
           }
         }
       }
-      // Handle broadcast messages
+      // Handle simple text message broadcasting
+      else if (type === 'MESSAGE' && receiverId === 'ALL') {
+        broadcastMessage(messageStr, ws);
+      }
+      // Handle other broadcast messages
       else if (receiverId === 'ALL') {
         // Broadcast to all clients except sender
         broadcastMessage(ensureMessageFormat(messageStr), ws);
