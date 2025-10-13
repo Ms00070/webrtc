@@ -1,0 +1,104 @@
+<<<<<<< HEAD
+=======
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SFU MP4 Streamer + Chat</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #121212; color: #eee; text-align: center; }
+    video { width: 70%; background: #000; border-radius: 10px; margin: 20px 0; }
+    #chatBox { width: 70%; margin: auto; background: #1e1e1e; border-radius: 8px; padding: 10px; text-align: left; }
+    input, button { padding: 8px; margin: 5px; border-radius: 4px; border: none; }
+    button { background: #0078ff; color: white; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>🌐 SFU MP4 Streaming + Chat</h2>
+  <input type="file" id="fileInput" accept="video/mp4" />
+  <video id="video" controls autoplay muted></video>
+ 
+  <div id="chatBox"></div>
+  <input id="chatInput" placeholder="Type a message..." />
+  <button onclick="sendChat()">Send</button>
+ 
+  <script>
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${location.host}`);
+    const video = document.getElementById('video');
+    const chatBox = document.getElementById('chatBox');
+    let localStream;
+    let peers = {};
+ 
+    ws.onopen = () => {
+      console.log("Connected to signaling server");
+      ws.send(JSON.stringify({ type: 'join' }));
+    };
+ 
+    ws.onmessage = async (msg) => {
+      const data = JSON.parse(msg.data);
+      switch (data.type) {
+        case 'offer': await handleOffer(data); break;
+        case 'answer': await handleAnswer(data); break;
+        case 'ice': if (peers[data.id]) peers[data.id].pc.addIceCandidate(data.candidate); break;
+        case 'chat': chatBox.innerHTML += `<div><b>${data.id}:</b> ${data.message}</div>`; break;
+      }
+    };
+ 
+    async function handleOffer(data) {
+      const pc = createPeerConnection(data.id);
+      peers[data.id] = { pc };
+      await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: 'answer', answer, id: data.id }));
+    }
+ 
+    async function handleAnswer(data) {
+      const pc = peers[data.id]?.pc;
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+    }
+ 
+    function createPeerConnection(id) {
+      const pc = new RTCPeerConnection();
+      pc.onicecandidate = (e) => {
+        if (e.candidate)
+          ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate, id }));
+      };
+      pc.ontrack = (e) => {
+        console.log("Receiving remote stream");
+        video.srcObject = e.streams[0];
+      };
+      return pc;
+    }
+ 
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+ 
+      const videoURL = URL.createObjectURL(file);
+      video.src = videoURL;
+      await video.play();
+ 
+      localStream = video.captureStream();
+      const pc = new RTCPeerConnection();
+      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+      pc.onicecandidate = (e) => {
+        if (e.candidate)
+          ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate, id: 'broadcaster' }));
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', offer, id: 'broadcaster' }));
+    });
+ 
+    function sendChat() {
+      const msg = document.getElementById('chatInput').value.trim();
+      if (!msg) return;
+      ws.send(JSON.stringify({ type: 'chat', message: msg }));
+      document.getElementById('chatInput').value = '';
+    }
+  </script>
+</body>
+</html>
+>>>>>>> 23409eac4c0e3fd8e5ee3b6ad046a8a078de1a5a
