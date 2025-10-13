@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC SFU Client</title>
+  <title>WebRTC SFU Client 1</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -709,19 +709,10 @@
      
       // Store the connection
       peerConnections[subscriberId] = pc;
- 
-      // Create and send offer to the new subscriber
-      pc.createOffer()
-        .then(offer => pc.setLocalDescription(offer))
-        .then(() => {
-          ws.send(`OFFER|${currentPeerId}|${subscriberId}|${JSON.stringify(pc.localDescription)}`);
-          log(`Sent OFFER to subscriber ${subscriberId}`);
-        })
-        .catch(err => log(`Error creating offer for subscriber: ${err}`, true));
      
       return pc;
     }
- 
+   
     function handleOffer(senderId, offerJson) {
       let pc = peerConnections[senderId];
       if (!pc) {
