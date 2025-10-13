@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC SFU Client</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+    .container { display: flex; flex-direction: column; gap: 20px; }
+    .video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; }
+    .video-container { position: relative; }
+    video { width: 100%; background-color: #000; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+    .video-label { position: absolute; bottom: 10px; left: 10px; background-color: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 4px; font-size: 14px; }
+    .control-panel { background-color: #f8f8f8; border-radius: 8px; padding: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+    button { background-color: #4285F4; color: white; border: none; border-radius: 4px; padding: 10px 15px; cursor: pointer; }
+    button:hover { background-color: #3367D6; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    .status { background-color: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; }
+    .tab { padding: 10px 20px; cursor: pointer; background-color: #f0f0f0; border: 1px solid #ddd; margin-right: 5px; border-radius: 5px 5px 0 0; }
+    .tab.active { background-color: white; border-bottom: 1px solid white; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WebRTC SFU Demo</h1>
+   
+    <div class="tabs">
+      <div class="tab active" data-tab="settings">Settings</div>
+      <div class="tab" data-tab="broadcaster">Broadcaster</div>
+      <div class="tab" data-tab="viewer">Viewer</div>
+    </div>
+   
+    <div class="tab-content active" id="settings-tab">
+      <div class="control-panel">
+        <h2>Connection Settings</h2>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px;">
+          <div>
+            <label for="peerId">Your Peer ID:</label>
+            <input type="text" id="peerId" value="WebClient-User1">
+          </div>
+          <div>
+            <label for="mode">Connection Mode:</label>
+            <select id="mode">
+              <option value="broadcaster">Broadcaster</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </div>
+        </div>
+       
+        <h2>Media Source</h2>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px;">
+          <div>
+            <label><input type="radio" name="streamSource" id="cameraSource" value="camera"> Camera/Microphone</label>
+            <label><input type="radio" name="streamSource" id="fileSource" value="file" checked> Video File</label>
+          </div>
+          <div>
+            <input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/ogg">
+            <video id="fileVideo" style="display:none;" controls></video>
+          </div>
+        </div>
+       
+        <div style="margin-top: 20px; display: flex; gap: 10px;">
+          <button id="connectBtn">Connect to Signaling Server</button>
+          <button id="disconnectBtn" disabled>Disconnect</button>
+        </div>
+      </div>
+    </div>
+   
+    <div class="tab-content" id="broadcaster-tab">
+      <div class="control-panel">
+        <h2>Broadcasting Controls</h2>
+        <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+          <button id="startStreamBtn" disabled>Start Broadcasting</button>
+          <button id="stopStreamBtn" disabled>Stop Broadcasting</button>
+        </div>
+       
+        <div class="video-container" style="max-width: 640px; margin-bottom: 20px;">
+          <video id="localVideo" autoplay muted playsinline controls></video>
+          <div class="video-label">Local Stream (You)</div>
+        </div>
+       
+        <h2>Data Channel</h2>
+        <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+          <input type="text" id="dataMessage" placeholder="Enter a message to broadcast">
+          <button id="sendDataBtn" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+   
+    <div class="tab-content" id="viewer-tab">
+      <div class="control-panel">
+        <h2>Available Broadcasters</h2>
+        <div id="broadcasterList" class="broadcaster-list">
+          <p>No broadcasters available. Connect to server first.</p>
+        </div>
+       
+        <h2>Received Streams</h2>
+      </div>
+     
+      <div id="remoteVideos" class="video-grid"></div>
+    </div>
+   
+    <div class="control-panel">
+      <h2>Status Log</h2>
+      <div id="statusLog" class="status"></div>
+    </div>
+  </div>
+ 
+  <script>
+    // DOM Elements
+    const peerId = document.getElementById('peerId');
+    const modeSelect = document.getElementById('mode');
+    const cameraSource = document.getElementById('cameraSource');
+    const fileSource = document.getElementById('fileSource');
+    const videoFileInput = document.getElementById('videoFileInput');
+    const fileVideo = document.getElementById('fileVideo');
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideos = document.getElementById('remoteVideos');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const startStreamBtn = document.getElementById('startStreamBtn');
+    const stopStreamBtn = document.getElementById('stopStreamBtn');
+    const dataMessage = document.getElementById('dataMessage');
+    const sendDataBtn = document.getElementById('sendDataBtn');
+    const statusLog = document.getElementById('statusLog');
+    const broadcasterList = document.getElementById('broadcasterList');
+    const tabs = document.querySelectorAll('.tab');
+    const tabContents = document.querySelectorAll('.tab-content');
+   
+    // WebRTC Variables
+    let localStream;
+    let ws;
+    let currentPeerId;
+    let peerConnections = {};
+    let dataChannels = {};
+    let subscribedTo = new Set();
+    let isBroadcaster = false;
+    let wsReconnectAttempts = 0;
+    let wsReconnectTimeout;
+    let connectionStatus = document.createElement('div');
+    connectionStatus.className = 'connection-status';
+    connectionStatus.style.position = 'fixed';
+    connectionStatus.style.bottom = '20px';
+    connectionStatus.style.right = '20px';
+    connectionStatus.style.padding = '10px';
+    connectionStatus.style.borderRadius = '5px';
+    connectionStatus.style.color = 'white';
+    connectionStatus.style.fontWeight = 'bold';
+    connectionStatus.style.zIndex = '1000';
+    document.body.appendChild(connectionStatus);
+
+    // Autoplay handler
+    document.addEventListener('click', attemptAutoplay);
+    
+    // Setup videoFileInput event listener
+    videoFileInput.addEventListener('change', function() {
+      if (this.files && this.files[0]) {
+        const file = this.files[0];
+        log(`File selected: ${file.name}, type: ${file.type}, size: ${Math.round(file.size/1024)}KB`);
+        
+        // Create object URL for the video
+        const objectURL = URL.createObjectURL(file);
+        fileVideo.src = objectURL;
+        
+        fileVideo.onloadedmetadata = () => {
+          log(`File video metadata loaded: ${fileVideo.videoWidth}x${fileVideo.videoHeight}, duration: ${fileVideo.duration.toFixed(1)}s`);
+        };
+      }
+    });
+   
+    // Handle tab switching
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tabContents.forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`${tab.dataset.tab}-tab`).classList.add('active');
+        attemptAutoplay();
+      });
+    });
+   
+    // Set up event listeners
+    modeSelect.addEventListener('change', () => {
+      if (modeSelect.value === 'broadcaster') {
+        document.querySelector('.tab[data-tab="broadcaster"]').style.display = 'block';
+        document.querySelector('.tab[data-tab="viewer"]').style.display = 'none';
+      } else {
+        document.querySelector('.tab[data-tab="broadcaster"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="viewer"]').style.display = 'block';
+      }
+    });
+   
+    connectBtn.addEventListener('click', connectToSignalingServer);
+    disconnectBtn.addEventListener('click', disconnect);
+    startStreamBtn.addEventListener('click', startBroadcasting);
+    stopStreamBtn.addEventListener('click', stopBroadcasting);
+    sendDataBtn.addEventListener('click', sendDataMessage);
+   
+    // Utility functions
+    function log(message, isError = false) {
+      const entry = document.createElement('div');
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      if (isError) entry.style.color = 'red';
+      statusLog.appendChild(entry);
+      statusLog.scrollTop = statusLog.scrollHeight;
+      console.log(message);
+    }
+    
+    // Attempt to autoplay all videos (addresses browser autoplay policy)
+    function attemptAutoplay() {
+      const videos = document.querySelectorAll('video');
+      videos.forEach(video => {
+        if (video.paused && video.srcObject) {
+          video.play().catch(e => log(`Autoplay failed: ${e.message}`, true));
+        }
+      });
+    }
+   
+    // Helper function to check and fix remote videos
+    function checkAndFixRemoteVideo() {
+      for (const broadcasterId of subscribedTo) {
+        const videoEl = document.getElementById(`remote-video-${broadcasterId}`);
+        if (videoEl && (!videoEl.srcObject || videoEl.srcObject.getTracks().length === 0) && peerConnections[broadcasterId]) {
+          const pc = peerConnections[broadcasterId];
+          const receivers = pc.getReceivers();
+         
+          if (receivers.length > 0) {
+            const stream = new MediaStream();
+            receivers.filter(r => r.track).forEach(r => {
+              stream.addTrack(r.track);
+              log(`Added track: kind=${r.track.kind}, enabled=${r.track.enabled}, muted=${r.track.muted}`);
+            });
+           
+            if (stream.getTracks().length > 0) {
+              log(`Fixed video: applying stream with ${stream.getTracks().length} tracks to element`);
+              videoEl.srcObject = stream;
+              videoEl.play().catch(e => log(`Error playing video: ${e}`, true));
+              log(`Fixed video display for ${broadcasterId}`);
+            }
+          }
+        }
+      }
+    }
+   
+    // Connection functions
+    function connectToSignalingServer() {
+      currentPeerId = peerId.value.trim() || `WebClient-${Date.now()}`;
+      const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+      const wsUrl = `${protocol}${window.location.host}`;
+     
+      updateConnectionStatus('connecting', 'Connecting to signaling server...');
+      log(`Attempting to connect to WebSocket at: ${wsUrl}`);
+     
+      // Clear any existing reconnection timeout
+      if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
+      }
+     
+      try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+          log('Connected to signaling server');
+          updateConnectionStatus('connected', 'Connected to signaling server');
+          connectBtn.disabled = true;
+          disconnectBtn.disabled = false;
+          startStreamBtn.disabled = false;
+          wsReconnectAttempts = 0;
+          
+          // Only send messages AFTER connection is established with a delay
+          setTimeout(() => {
+            try {
+              log(`WebSocket state before sending: ${ws.readyState}`);
+              // WebSocket.OPEN = 1
+              if (ws.readyState === WebSocket.OPEN) {
+                const initialMsg = `NEWPEER|${currentPeerId}|ALL|${modeSelect.value}|0|${modeSelect.value === 'broadcaster'}`;
+                ws.send(initialMsg);
+                log(`Sent initial message: ${initialMsg}`);
+                
+                if (modeSelect.value === 'broadcaster') {
+                  const broadcastMsg = `BROADCAST_REGISTER|${currentPeerId}|ALL|New broadcaster available|0|true`;
+                  ws.send(broadcastMsg);
+                  isBroadcaster = true;
+                  log(`Sent broadcast registration: ${broadcastMsg}`);
+                }
+              } else {
+                log(`Cannot send messages - WebSocket not in OPEN state (state: ${ws.readyState})`, true);
+              }
+            } catch (e) {
+              log(`Error sending initial messages: ${e.message}`, true);
+              console.error('WebSocket send error:', e);
+            }
+          }, 500); // Add a small delay to ensure connection is ready
+          
+          setInterval(checkAndFixRemoteVideo, 3000);
+        };
+        
+        ws.onclose = (event) => {
+          log(`Disconnected from signaling server (code: ${event.code})`, true);
+          updateConnectionStatus('disconnected', 'Disconnected from signaling server');
+         
+          if (wsReconnectAttempts < 5) {
+            const delay = Math.min(1000 * (Math.pow(2, wsReconnectAttempts)), 30000);
+            log(`Attempting to reconnect in ${delay/1000} seconds...`);
+            updateConnectionStatus('reconnecting', `Reconnecting in ${delay/1000}s (attempt ${wsReconnectAttempts + 1}/5)`);
+           
+            wsReconnectTimeout = setTimeout(() => {
+              wsReconnectAttempts++;
+              connectToSignalingServer();
+            }, delay);
+          } else {
+            log('Maximum reconnection attempts reached. Please reconnect manually.');
+            cleanupWebRTC();
+          }
+        };
+        
+        ws.onerror = (error) => {
+          log('WebSocket error occurred', true);
+          console.error('WebSocket error:', error);
+        };
+        
+        ws.onmessage = (event) => handleSignalingMessage(event.data);
+      } catch (e) {
+        log(`Error creating WebSocket: ${e.message}`, true);
+        console.error('WebSocket creation error:', e);
+      }
+    }
+   
+    function updateConnectionStatus(status, message) {
+      switch (status) {
+        case 'connecting':
+          connectionStatus.style.backgroundColor = '#FFA500'; // Orange
+          break;
+        case 'connected':
+          connectionStatus.style.backgroundColor = '#4CAF50'; // Green
+          break;
+        case 'disconnected':
+          connectionStatus.style.backgroundColor = '#F44336'; // Red
+          break;
+        case 'reconnecting':
+          connectionStatus.style.backgroundColor = '#FF9800'; // Amber
+          break;
+        default:
+          connectionStatus.style.backgroundColor = '#9E9E9E'; // Grey
+      }
+      connectionStatus.textContent = message;
+    }
+
+    function disconnect() {
+      // Clear any reconnection attempts
+      if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
+      }
+      wsReconnectAttempts = 0;
+     
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(`DISPOSE|${currentPeerId}|ALL|Remove peerConnection for ${currentPeerId}.|0|false`);
+          ws.close();
+        } catch (e) {
+          console.error('Error during disconnect:', e);
+        }
+      }
+     
+      updateConnectionStatus('disconnected', 'Disconnected');
+      cleanupWebRTC();
+    }
+   
+    function cleanupWebRTC() {
+      // Stop all media tracks
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch (e) {
+            console.error('Error stopping track:', e);
+          }
+        });
+        localStream = null;
+      }
+     
+      // Close all peer connections
+      for (const peerId in peerConnections) {
+        try {
+          if (peerConnections[peerId]) {
+            peerConnections[peerId].close();
+          }
+        } catch (e) {
+          console.error(`Error closing peer connection with ${peerId}:`, e);
+        }
+      }
+     
+      // Clear all collections
+      peerConnections = {};
+      dataChannels = {};
+      subscribedTo.clear();
+     
+      // Reset UI elements
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+      startStreamBtn.disabled = true;
+      stopStreamBtn.disabled = true;
+      sendDataBtn.disabled = true;
+     
+      // Clear media elements
+      try {
+        localVideo.srcObject = null;
+      } catch (e) {
+        console.error('Error clearing localVideo:', e);
+      }
+     
+      remoteVideos.innerHTML = '';
+      broadcasterList.innerHTML = '<p>No broadcasters available. Connect to server first.</p>';
+     
+      log('WebRTC connections cleaned up');
+    }
+   
+    async function startBroadcasting() {
+      try {
+        log(`Starting broadcasting. WebSocket state: ${ws.readyState}`);
+        if (cameraSource.checked) {
+          log('Requesting camera access...');
+          try {
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+              video: {width: {ideal: 1280}, height: {ideal: 720}}, 
+              audio: true 
+            });
+            log(`Camera stream acquired. Tracks: ${localStream.getTracks().length}`);
+            localStream.getTracks().forEach(track => {
+              log(`Camera track: kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}`);
+            });
+          } catch (err) {
+            log(`Camera access error: ${err.message}`, true);
+            throw err;
+          }
+        } else {
+          if (!videoFileInput.files[0]) {
+            log('Please select a video file first', true);
+            return;
+          }
+          
+          const file = videoFileInput.files[0];
+          log(`Using file: ${file.name}, type: ${file.type}, size: ${Math.round(file.size/1024)}KB`);
+          
+          // Reset video element
+          fileVideo.pause();
+          fileVideo.currentTime = 0;
+          
+          try {
+            // Make sure video is visible but hidden from view
+            fileVideo.style.position = 'fixed';
+            fileVideo.style.left = '-9999px';
+            fileVideo.style.top = '-9999px';
+            fileVideo.style.display = 'block';
+            
+            // Ensure the video plays from the beginning
+            fileVideo.currentTime = 0;
+            
+            // Play the video before capturing the stream
+            await fileVideo.play();
+            
+            // Capture the stream
+            if (fileVideo.captureStream) {
+              log('Using standard captureStream API');
+              localStream = fileVideo.captureStream();
+            } else if (fileVideo.mozCaptureStream) {
+              log('Using Firefox mozCaptureStream API');
+              localStream = fileVideo.mozCaptureStream();
+            } else {
+              throw new Error('Video captureStream not supported in this browser');
+            }
+            
+            // Setup loop for the video file
+            fileVideo.loop = true;
+            
+            log(`File stream captured. Tracks: ${localStream.getTracks().length}`);
+            localStream.getTracks().forEach(track => {
+              log(`File track: kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}`);
+            });
+          } catch (err) {
+            log(`Error capturing file stream: ${err.message}`, true);
+            throw err;
+          }
+        }
+       
+        // Apply to local video
+        localVideo.srcObject = localStream;
+        localVideo.onloadedmetadata = () => {
+          log(`Local video metadata loaded: ${localVideo.videoWidth}x${localVideo.videoHeight}`);
+        };
+        
+        localVideo.play().catch(e => {
+          log(`Error playing local video: ${e.message}`, true);
+          // Try again after user interaction
+          document.body.addEventListener('click', () => {
+            localVideo.play().catch(e => console.error('Still could not play:', e));
+          }, { once: true });
+        });
+        
+        startStreamBtn.disabled = true;
+        stopStreamBtn.disabled = false;
+        sendDataBtn.disabled = false;
+       
+        if (!isBroadcaster && ws.readyState === WebSocket.OPEN) {
+          try {
+            log('Registering as broadcaster...');
+            ws.send(`BROADCAST_REGISTER|${currentPeerId}|ALL|New broadcaster available|0|true`);
+            isBroadcaster = true;
+            log('Sent BROADCAST_REGISTER message');
+          } catch (e) {
+            log(`Error sending broadcast register: ${e.message}`, true);
+          }
+        } else if (ws.readyState !== WebSocket.OPEN) {
+          log(`Cannot register as broadcaster - WebSocket not in OPEN state (state: ${ws.readyState})`, true);
+        }
+      } catch (err) {
+        log(`Error starting stream: ${err.message}`, true);
+        console.error('Full streaming error:', err);
+      }
+    }
+   
+    function stopBroadcasting() {
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localVideo.srcObject = null;
+        localStream = null;
+      }
+      
+      // If using a file, remove the URL
+      if (fileVideo.src) {
+        URL.revokeObjectURL(fileVideo.src);
+        fileVideo.removeAttribute('src');
+        fileVideo.style.display = 'none';
+      }
+     
+      startStreamBtn.disabled = false;
+      stopStreamBtn.disabled = true;
+      sendDataBtn.disabled = true;
+    }
+
+    function handleSignalingMessage(message) {
+      const parts = message.split('|');
+      if (parts.length < 4) return;
+     
+      const type = parts[0];
+      const senderId = parts[1];
+      const receiverId = parts[2];
+      const content = parts[3];
+     
+      if (receiverId !== currentPeerId && receiverId !== 'ALL') return;
+     
+      switch (type) {
+        case 'NEWPEER':
+        case 'BROADCAST_AVAILABLE':
+          if (senderId !== currentPeerId && (parts[5] === 'true' || content.includes('broadcaster'))) {
+            log(`Received broadcaster notification from: ${senderId}`);
+            handleBroadcasterAvailable(senderId);
+          }
+          break;
+        case 'SUBSCRIBER_JOINED':
+        case 'SUBSCRIBE':
+          if (isBroadcaster && senderId !== currentPeerId) {
+            log(`Subscriber joined: ${senderId}`);
+            createPeerConnectionForSubscriber(senderId);
+          }
+          break;
+        case 'OFFER':
+          log(`Received offer from: ${senderId}`);
+          handleOffer(senderId, content);
+          break;
+        case 'ANSWER':
+          log(`Received answer from: ${senderId}`);
+          handleAnswer(senderId, content);
+          break;
+        case 'CANDIDATE':
+          handleCandidate(senderId, content);
+          break;
+        case 'DISPOSE':
+          log(`Peer disconnected: ${senderId}`);
+          removePeerConnection(senderId);
+          break;
+      }
+    }
+   
+    function handleBroadcasterAvailable(broadcasterId) {
+      if (broadcasterId === currentPeerId || modeSelect.value !== 'viewer') return;
+     
+      const existingBroadcaster = document.getElementById(`broadcaster-${broadcasterId}`);
+      if (!existingBroadcaster) {
+        if (broadcasterList.querySelector('p')) {
+          broadcasterList.innerHTML = '';
+        }
+       
+        const broadcasterDiv = document.createElement('div');
+        broadcasterDiv.id = `broadcaster-${broadcasterId}`;
+        broadcasterDiv.className = 'broadcaster';
+        broadcasterDiv.style.padding = '10px';
+        broadcasterDiv.style.marginBottom = '5px';
+        broadcasterDiv.style.backgroundColor = '#e9f5ff';
+        broadcasterDiv.style.borderRadius = '4px';
+        broadcasterDiv.style.display = 'flex';
+        broadcasterDiv.style.justifyContent = 'space-between';
+        broadcasterDiv.style.alignItems = 'center';
+       
+        broadcasterDiv.innerHTML = `
+          <div>${broadcasterId}</div>
+          <button class="subscribe-btn" data-broadcaster-id="${broadcasterId}">Subscribe</button>
+        `;
+        broadcasterList.appendChild(broadcasterDiv);
+       
+        const subscribeBtn = broadcasterDiv.querySelector('.subscribe-btn');
+        subscribeBtn.addEventListener('click', () => {
+          const bId = subscribeBtn.dataset.broadcasterId;
+          if (subscribedTo.has(bId)) {
+            unsubscribeFromBroadcaster(bId);
+            subscribeBtn.textContent = 'Subscribe';
+          } else {
+            subscribeTobroadcaster(bId);
+            subscribeBtn.textContent = 'Unsubscribe';
+          }
+        });
+      }
+    }
+   
+    function subscribeTobroadcaster(broadcasterId) {
+      if (subscribedTo.has(broadcasterId)) return;
+     
+      log(`Subscribing to broadcaster: ${broadcasterId}`);
+      subscribedTo.add(broadcasterId);
+      ws.send(`SUBSCRIBE|${currentPeerId}|${broadcasterId}|Subscribing to broadcast|0|false`);
+     
+      if (!peerConnections[broadcasterId]) {
+        createPeerConnectionForBroadcaster(broadcasterId);
+      }
+    }
+   
+    function unsubscribeFromBroadcaster(broadcasterId) {
+      if (!subscribedTo.has(broadcasterId)) return;
+     
+      log(`Unsubscribing from broadcaster: ${broadcasterId}`);
+      subscribedTo.delete(broadcasterId);
+      removePeerConnection(broadcasterId);
+     
+      const videoEl = document.getElementById(`remote-container-${broadcasterId}`);
+      if (videoEl) videoEl.remove();
+    }
+   
+    function createPeerConnectionForBroadcaster(broadcasterId) {
+      log(`Creating peer connection for broadcaster: ${broadcasterId}`);
+      
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun.stunprotocol.org:3478' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
+        ],
+        iceCandidatePoolSize: 10,
+        sdpSemantics: 'unified-plan'
+      });
+     
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          const candidateJson = JSON.stringify(event.candidate);
+          log(`Generated ICE candidate for ${broadcasterId}`);
+          ws.send(`CANDIDATE|${currentPeerId}|${broadcasterId}|${candidateJson}`);
+        }
+      };
+     
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state with ${broadcasterId}: ${pc.iceConnectionState}`);
+        const statusEl = document.getElementById(`connection-status-${broadcasterId}`) ||
+                        document.createElement('div');
+       
+        if (!statusEl.id) {
+          statusEl.id = `connection-status-${broadcasterId}`;
+          statusEl.className = 'ice-connection-status';
+          statusEl.style.padding = '5px';
+          statusEl.style.fontSize = '12px';
+          statusEl.style.borderRadius = '3px';
+          statusEl.style.textAlign = 'center';
+          statusEl.style.margin = '5px 0';
+          const container = document.getElementById(`remote-container-${broadcasterId}`);
+          if (container) {
+            container.appendChild(statusEl);
+          }
+        }
+       
+        switch(pc.iceConnectionState) {
+          case 'checking':
+            statusEl.style.backgroundColor = '#FFF59D'; // Light yellow
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connecting...';
+            break;
+          case 'connected':
+          case 'completed':
+            statusEl.style.backgroundColor = '#A5D6A7'; // Light green
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connected';
+            attemptAutoplay(); // Try to play videos when connection is established
+            break;
+          case 'failed':
+            statusEl.style.backgroundColor = '#EF9A9A'; // Light red
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connection failed - try refreshing';
+            break;
+          case 'disconnected':
+            statusEl.style.backgroundColor = '#FFCC80'; // Light orange
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Disconnected - attempting to reconnect';
+            break;
+          case 'closed':
+            statusEl.style.backgroundColor = '#E0E0E0'; // Light gray
+            statusEl.style.color = 'black';
+            statusEl.textContent = 'Connection closed';
+            break;
+        }
+      };
+     
+      pc.ontrack = (event) => {
+        log(`Received track from ${broadcasterId}: kind=${event.track.kind}, readyState=${event.track.readyState}`);
+        
+        let container = document.getElementById(`remote-container-${broadcasterId}`);
+        let videoEl = document.getElementById(`remote-video-${broadcasterId}`);
+       
+        if (!container) {
+          container = document.createElement('div');
+          container.id = `remote-container-${broadcasterId}`;
+          container.className = 'video-container';
+         
+          videoEl = document.createElement('video');
+          videoEl.id = `remote-video-${broadcasterId}`;
+          videoEl.autoplay = true;
+          videoEl.playsInline = true;
+          videoEl.controls = true; // Add controls for better user experience
+         
+          const label = document.createElement('div');
+          label.className = 'video-label';
+          label.textContent = `Broadcaster: ${broadcasterId}`;
+         
+          container.appendChild(videoEl);
+          container.appendChild(label);
+          remoteVideos.appendChild(container);
+         
+          // Add status indicator
+          const statusEl = document.createElement('div');
+          statusEl.id = `connection-status-${broadcasterId}`;
+          statusEl.className = 'ice-connection-status';
+          statusEl.style.padding = '5px';
+          statusEl.style.fontSize = '12px';
+          statusEl.style.borderRadius = '3px';
+          statusEl.style.textAlign = 'center';
+          statusEl.style.margin = '5px 0';
+          statusEl.style.backgroundColor = '#FFF59D'; // Light yellow
+          statusEl.style.color = 'black';
+          statusEl.textContent = 'Connecting...';
+          container.appendChild(statusEl);
+        }
+       
+        if (!videoEl.srcObject) {
+          videoEl.srcObject = new MediaStream();
+          log(`Created new MediaStream for remote video element`);
+        }
+       
+        videoEl.srcObject.addTrack(event.track);
+        log(`Added ${event.track.kind} track to remote stream`);
+        
+        videoEl.onloadedmetadata = () => {
+          log(`Remote video metadata loaded: ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+        };
+        
+        videoEl.onplay = () => {
+          log(`Remote video playback started`);
+        };
+        
+        videoEl.onerror = (e) => {
+          log(`Remote video error: ${videoEl.error ? videoEl.error.message : 'unknown'}`, true);
+        };
+        
+        videoEl.play().catch(e => {
+          log(`Error auto-playing video: ${e.message}. Click to play.`, true);
+          // Listen for user interaction to play the video
+          document.addEventListener('click', function playVideoOnce() {
+            videoEl.play().catch(e => log(`Still cannot play video: ${e.message}`, true));
+            document.removeEventListener('click', playVideoOnce);
+          });
+        });
+      };
+
+      // Create a data channel for this connection
+      const dc = pc.createDataChannel(`data-${broadcasterId}`);
+      dc.onopen = () => {
+        log(`Data channel with ${broadcasterId} opened`);
+      };
+      
+      dc.onclose = () => {
+        log(`Data channel with ${broadcasterId} closed`);
+      };
+      
+      dc.onmessage = (event) => {
+        log(`Data message from ${broadcasterId}: ${event.data}`);
+      };
+      
+      dataChannels[broadcasterId] = dc;
+      peerConnections[broadcasterId] = pc;
+     
+      // Create and send an offer
+      pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      })
+        .then(offer => {
+          log(`Created offer for ${broadcasterId}`);
+          return pc.setLocalDescription(offer);
+        })
+        .then(() => {
+          const offerJson = JSON.stringify({
+            type: 'offer',
+            sdp: pc.localDescription.sdp
+          });
+          log(`Sending offer to ${broadcasterId}`);
+          ws.send(`OFFER|${currentPeerId}|${broadcasterId}|${offerJson}`);
+        })
+        .catch(e => {
+          log(`Error creating offer: ${e.message}`, true);
+        });
+    }
+   
+    function createPeerConnectionForSubscriber(subscriberId) {
+      log(`Creating peer connection for subscriber: ${subscriberId}`);
+      
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun.stunprotocol.org:3478' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
+        ],
+        iceCandidatePoolSize: 10,
+        sdpSemantics: 'unified-plan'
+      });
+     
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          const candidateJson = JSON.stringify(event.candidate);
+          ws.send(`CANDIDATE|${currentPeerId}|${subscriberId}|${candidateJson}`);
+        }
+      };
+     
+      // Monitor ICE connection state
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state with subscriber ${subscriberId}: ${pc.iceConnectionState}`);
+        
+        if (isBroadcaster) {
+          switch(pc.iceConnectionState) {
+            case 'connected':
+            case 'completed':
+              log(`Subscriber ${subscriberId} connected successfully`);
+              break;
+            case 'failed':
+              log(`Connection with subscriber ${subscriberId} failed`, true);
+              break;
+            case 'disconnected':
+              log(`Subscriber ${subscriberId} disconnected - attempting to reconnect`);
+              break;
+          }
+        }
+      };
+     
+      // Monitor connection state
+      pc.onconnectionstatechange = () => {
+        log(`Connection state with ${subscriberId}: ${pc.connectionState}`);
+        if (pc.connectionState === 'failed') {
+          log(`Connection with ${subscriberId} failed permanently. Cleaning up.`, true);
+          setTimeout(() => {
+            removePeerConnection(subscriberId);
+          }, 5000);
+        }
+      };
+     
+      // Add local stream tracks to the connection if we're broadcasting
+      if (localStream) {
+        log(`Adding ${localStream.getTracks().length} local tracks to connection`);
+        localStream.getTracks().forEach(track => {
+          pc.addTrack(track, localStream);
+          log(`Added local ${track.kind} track to peer connection`);
+        });
+      } else {
+        log('No local stream available to add to peer connection', true);
+      }
+     
+      pc.ondatachannel = (event) => {
+        log(`Data channel received from ${subscriberId}`);
+        dataChannels[subscriberId] = event.channel;
+        
+        const channel = event.channel;
+        channel.onmessage = (e) => {
+          log(`Data message from ${subscriberId}: ${e.data}`);
+        };
+       
+        channel.onopen = () => {
+          log(`Data channel with ${subscriberId} opened`);
+        };
+       
+        channel.onclose = () => {
+          log(`Data channel with ${subscriberId} closed`);
+        };
+      };
+     
+      peerConnections[subscriberId] = pc;
+      return pc;
+    }
+    
+    function handleOffer(senderId, offerJson) {
+      log(`Processing offer from ${senderId}`);
+      let pc = peerConnections[senderId];
+      
+      if (!pc) {
+        log(`Creating new peer connection for offer from ${senderId}`);
+        pc = isBroadcaster ?
+          createPeerConnectionForSubscriber(senderId) :
+          createPeerConnectionForBroadcaster(senderId);
+        
+        if (!isBroadcaster) {
+          subscribedTo.add(senderId);
+          log(`Added ${senderId} to subscribed broadcasters`);
+        }
+      }
+     
+      try {
+        const offer = JSON.parse(offerJson);
+        log(`Setting remote description (offer) from ${senderId}`);
+        
+        pc.setRemoteDescription(new RTCSessionDescription({
+          type: 'offer',
+          sdp: offer.sdp
+        }))
+        .then(() => {
+          log(`Remote description set successfully`);
+          
+          // Make sure tracks are added if we're broadcasting
+          if (isBroadcaster && localStream) {
+            const senders = pc.getSenders();
+            if (senders.length === 0) {
+              log(`Adding local tracks to connection (${localStream.getTracks().length} tracks)`);
+              localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+              });
+            }
+          }
+          
+          log(`Creating answer for ${senderId}`);
+          return pc.createAnswer();
+        })
+        .then(answer => {
+          log(`Setting local description (answer)`);
+          return pc.setLocalDescription(answer);
+        })
+        .then(() => {
+          const answerJson = JSON.stringify({
+            type: 'answer',
+            sdp: pc.localDescription.sdp
+          });
+          log(`Sending answer to ${senderId}`);
+          ws.send(`ANSWER|${currentPeerId}|${senderId}|${answerJson}`);
+        })
+        .catch(e => {
+          log(`Error processing offer: ${e.message}`, true);
+          console.error('Full error:', e);
+        });
+      } catch (e) {
+        log(`Error parsing offer JSON: ${e.message}`, true);
+      }
+    }
+   
+    function handleAnswer(senderId, answerJson) {
+      const pc = peerConnections[senderId];
+      if (!pc) {
+        log(`Received answer but no peer connection exists for ${senderId}`, true);
+        return;
+      }
+     
+      try {
+        const answer = JSON.parse(answerJson);
+        log(`Setting remote description (answer) from ${senderId}`);
+        
+        pc.setRemoteDescription(new RTCSessionDescription({
+          type: 'answer',
+          sdp: answer.sdp
+        }))
+        .then(() => {
+          log(`Remote answer applied successfully for ${senderId}`);
+        })
+        .catch(e => {
+          log(`Error setting remote description: ${e.message}`, true);
+        });
+      } catch (e) {
+        log(`Error parsing answer JSON: ${e.message}`, true);
+      }
+    }
+   
+    function handleCandidate(senderId, candidateJson) {
+      const pc = peerConnections[senderId];
+      if (!pc) {
+        log(`Received ICE candidate but no peer connection exists for ${senderId}`);
+        return;
+      }
+     
+      try {
+        const candidate = JSON.parse(candidateJson);
+        log(`Adding ICE candidate from ${senderId}`);
+        
+        pc.addIceCandidate(new RTCIceCandidate(candidate))
+        .catch(e => {
+          log(`Error adding ICE candidate: ${e.message}`, true);
+        });
+      } catch (e) {
+        log(`Error parsing candidate JSON: ${e.message}`, true);
+      }
+    }
+   
+    function removePeerConnection(peerId) {
+      log(`Removing peer connection for ${peerId}`);
+      
+      if (peerConnections[peerId]) {
+        peerConnections[peerId].close();
+        delete peerConnections[peerId];
+      }
+     
+      if (dataChannels[peerId]) {
+        delete dataChannels[peerId];
+      }
+     
+      if (modeSelect.value === 'viewer') {
+        const broadcasterEl = document.getElementById(`broadcaster-${peerId}`);
+        if (broadcasterEl) broadcasterEl.remove();
+       
+        if (broadcasterList.children.length === 0) {
+          broadcasterList.innerHTML = '<p>No broadcasters available. Connect to server first.</p>';
+        }
+       
+        const videoEl = document.getElementById(`remote-container-${peerId}`);
+        if (videoEl) videoEl.remove();
+       
+        subscribedTo.delete(peerId);
+      }
+      
+      log(`Peer connection for ${peerId} removed`);
+    }
+   
+    function sendDataMessage() {
+      const message = dataMessage.value.trim();
+      if (!message) return;
+     
+      log(`Sending data message: ${message}`);
+      let sentCount = 0;
+      
+      if (isBroadcaster) {
+        for (const peerId in dataChannels) {
+          const channel = dataChannels[peerId];
+          if (channel && channel.readyState === 'open') {
+            channel.send(message);
+            sentCount++;
+          }
+        }
+      } else {
+        for (const broadcasterId of subscribedTo) {
+          const channel = dataChannels[broadcasterId];
+          if (channel && channel.readyState === 'open') {
+            channel.send(message);
+            sentCount++;
+          }
+        }
+      }
+     
+      log(`Message sent to ${sentCount} peers`);
+      dataMessage.value = '';
+    }
+
+    // File input change handler to set up video source
+    videoFileInput.addEventListener('change', function() {
+      if (this.files && this.files[0]) {
+        const file = this.files[0];
+        log(`Selected file: ${file.name} (${file.type}), ${Math.round(file.size/1024)} KB`);
+        
+        // Create URL for the video file
+        const url = URL.createObjectURL(file);
+        fileVideo.src = url;
+        
+        // Pre-load the video metadata
+        fileVideo.onloadedmetadata = () => {
+          log(`Video metadata loaded: ${fileVideo.videoWidth}x${fileVideo.videoHeight}, ${fileVideo.duration.toFixed(1)}s`);
+        };
+      }
+    });
+
+    // Hide viewer tab by default
+    document.querySelector('.tab[data-tab="viewer"]').style.display = 'none';
+  </script>
+</body>
+</html>
