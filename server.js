@@ -1,18 +1,16 @@
-import express from "express";
-import http from "http";
-import { WebSocketServer } from "ws";
-import { v4 as uuidv4 } from "uuid";
-import path from "path";
-import { fileURLToPath } from "url";
- 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const { v4: uuidv4 } = require("uuid");
+const path = require("path");
  
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocket.Server({ server });
+ 
 const PORT = process.env.PORT || 3000;
  
+// Serve static files from /public
 app.use(express.static(path.join(__dirname, "public")));
  
 let clients = {}; // { id: ws }
@@ -27,7 +25,7 @@ wss.on("connection", (ws) => {
     try {
       data = JSON.parse(msg);
     } catch (err) {
-      console.log("Invalid JSON", msg);
+      console.log("Invalid JSON:", msg);
       return;
     }
  
@@ -35,15 +33,19 @@ wss.on("connection", (ws) => {
       case "join":
         broadcast({ type: "user-joined", id });
         break;
+ 
       case "offer":
         broadcastExcept(id, { type: "offer", id, offer: data.offer });
         break;
+ 
       case "answer":
         broadcastExcept(id, { type: "answer", id, answer: data.answer });
         break;
+ 
       case "ice":
         broadcastExcept(id, { type: "ice", id, candidate: data.candidate });
         break;
+ 
       case "chat":
         broadcast({ type: "chat", id, message: data.message });
         break;
@@ -59,18 +61,18 @@ wss.on("connection", (ws) => {
  
 function broadcast(data) {
   Object.values(clients).forEach((client) => {
-    if (client.readyState === 1) client.send(JSON.stringify(data));
+    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data));
   });
 }
  
 function broadcastExcept(senderId, data) {
   Object.entries(clients).forEach(([id, client]) => {
-    if (id !== senderId && client.readyState === 1)
+    if (id !== senderId && client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify(data));
+    }
   });
 }
  
 server.listen(PORT, () => {
-  console.log(`✅ SFU server running on port ${PORT}`);
+  console.log(`✅ SFU signaling server running on port ${PORT}`);
 });
- 
