@@ -1,7 +1,7 @@
 {
   "name": "webrtc-signaling-server",
-  "version": "1.1.0",
-  "description": "WebRTC signaling server with SFU capabilities for browser and Unity clients",
+  "version": "1.1.1",
+  "description": "WebRTC signaling server with SFU capabilities for browser, Unity, and Python clients",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
@@ -23,4 +24,3 @@
   },
   "keywords": ["webrtc", "signaling", "sfu", "unity", "video streaming"]
 }
- 
