@@ -19,7 +19,7 @@ const videoSenders = new Map();
 const pendingMessages = new Map();
 
 // Your RTSP camera URL
-const CAMERA_URL = 'rtsp://10.210.14.58:554/stream1';
+const CAMERA_URL = 'rtsp://10.210.14.58:8080/h264_ulaw.sdp';
 
 wss.on('connection', (ws) => {
   console.log('Client connected');
