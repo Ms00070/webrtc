@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC SFU Client 2</title>
+  <title>WebRTC SFU Client 3</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -478,11 +478,11 @@
       log(`Received ${type} from ${senderId}`);
      
       switch (type) {
+        case 'MESSAGE':
+          log(`Message from ${senderId}: ${content}`);
+          break;
         case 'NEWPEER':
           handleNewPeer(senderId, content, parts[5] === 'true');
-          break;
-        case 'BROADCAST_AVAILABLE':
-          handleBroadcasterAvailable(senderId);
           break;
         case 'SUBSCRIBER_JOINED':
           if (isBroadcaster && senderId !== currentPeerId) {
@@ -723,17 +723,10 @@
     }
  
     function handleOffer(senderId, offerJson) {
-      let pc = peerConnections[senderId];
+      const pc = peerConnections[senderId];
       if (!pc) {
-        // If we're a broadcaster, create connection for this subscriber
-        if (isBroadcaster) {
-          pc = createPeerConnectionForSubscriber(senderId);
-        }
-        // If we're a viewer, create connection for this broadcaster
-        else {
-          pc = createPeerConnectionForBroadcaster(senderId);
-          subscribedTo.add(senderId);
-        }
+        log(`Received offer from ${senderId} but no peer connection exists.`, true);
+        return;
       }
      
       // Parse the offer and set as remote description
