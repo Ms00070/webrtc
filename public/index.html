@@ -5,103 +5,253 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebRTC IP Camera Stream</title>
   <style>
-    body { font-family: Arial; max-width: 800px; margin: 0 auto; padding: 20px; }
-    video { width: 640px; height: 480px; background: #000; border: 1px solid #ccc; margin-bottom: 10px; }
-    .status { font-family: monospace; background: #f7f7f7; border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: auto; }
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f2f2f2;
+    }
+    h2, h3 {
+      text-align: center;
+    }
+    .video-container {
+      display: flex;
+      justify-content: space-around;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    video, img {
+      width: 360px;
+      height: 240px;
+      background: #000;
+      border: 2px solid #ccc;
+      border-radius: 8px;
+      object-fit: cover;
+    }
+    .status {
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 10px;
+      height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+    }
+    button {
+      background: #0078ff;
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+    button:hover {
+      background: #005ec9;
+    }
   </style>
 </head>
 <body>
-  <h2>IP Camera via WebRTC</h2>
-  <video id="remoteVideo" autoplay playsinline></video>
-  <div>
-    <label>Peer ID:</label>
-    <input type="text" id="peerId" value="IPCam-Client">
-    <button id="connectBtn">Connect</button>
+  <h2>📡 WebRTC IP Camera Stream</h2>
+
+  <div class="video-container">
+    <div>
+      <h3>Local Stream (IP Camera)</h3>
+      <img id="ipCamImage" src="" alt="IP Camera Stream">
+    </div>
+    <div>
+      <h3>Remote Stream (Receiver)</h3>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
   </div>
-  <h3>Status</h3>
+
+  <div style="text-align:center; margin-bottom: 20px;">
+    <label>Peer ID: </label>
+    <input type="text" id="peerId" value="IPCam-Sender">
+    <button id="connectBtn">Connect & Stream</button>
+  </div>
+
+  <h3>Status Log</h3>
   <div id="statusLog" class="status"></div>
 
   <script>
-    const remoteVideo = document.getElementById('remoteVideo');
-    const peerIdInput = document.getElementById('peerId');
-    const connectBtn = document.getElementById('connectBtn');
-    const statusLog = document.getElementById('statusLog');
+    const ipCamUrl = "http://10.210.14.58:8080/video"; // Replace with your IP camera URL
+    const ipCamImage = document.getElementById("ipCamImage");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const peerIdInput = document.getElementById("peerId");
+    const connectBtn = document.getElementById("connectBtn");
+    const statusLog = document.getElementById("statusLog");
 
-    let ws, pc;
+    let ws, peerConnection;
+    const connectedPeers = new Set(); // Track connected peers
 
-    function log(msg, error=false){
-      const div=document.createElement('div');
+    // Logging helper
+    function log(msg, isError = false) {
+      const div = document.createElement("div");
       div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      if(error) div.style.color='red';
+      if (isError) div.style.color = "red";
       statusLog.appendChild(div);
-      statusLog.scrollTop=statusLog.scrollHeight;
+      statusLog.scrollTop = statusLog.scrollHeight;
       console.log(msg);
     }
 
-    connectBtn.onclick = () => {
+    // Update connected peers display
+    function updatePeerList() {
+      // Remove previous peer list
+      const oldList = document.getElementById("peerList");
+      if (oldList) oldList.remove();
+
+      const peersDiv = document.createElement("div");
+      peersDiv.id = "peerList";
+      peersDiv.textContent = "Connected Peers: " + Array.from(connectedPeers).join(", ");
+      peersDiv.style.fontWeight = "bold";
+      peersDiv.style.marginBottom = "5px";
+      statusLog.prepend(peersDiv);
+    }
+
+    // Keep reloading IP camera snapshots
+    function startIPCamera() {
+      ipCamImage.src = `${ipCamUrl}?time=${Date.now()}`;
+      ipCamImage.onload = () => setTimeout(startIPCamera, 100);
+      ipCamImage.onerror = () => {
+        log("⚠️ Failed to load IP camera frame. Retrying...");
+        setTimeout(startIPCamera, 2000);
+      };
+    }
+
+    async function createFakeVideoStreamFromCanvas() {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      canvas.width = 640;
+      canvas.height = 480;
+
+      const stream = canvas.captureStream(15); // 15 FPS
+      log("🖼️ Creating virtual video stream from IP camera...");
+
+      const drawFrame = () => {
+        ctx.drawImage(ipCamImage, 0, 0, canvas.width, canvas.height);
+        requestAnimationFrame(drawFrame);
+      };
+      drawFrame();
+
+      return stream;
+    }
+
+    connectBtn.onclick = async () => {
       const peerId = peerIdInput.value.trim();
-      if(!peerId){ log('Enter Peer ID', true); return; }
+      if (!peerId) {
+        log("❌ Enter a valid Peer ID", true);
+        return;
+      }
 
-      const protocol = location.protocol==='https:'?'wss://':'ws://';
-      ws = new WebSocket(`${protocol}${location.host}`);
+      startIPCamera();
+      const localStream = await createFakeVideoStreamFromCanvas();
 
-      ws.onopen = () => {
-        log('Connected to signaling server');
-        ws.send(`NEWPEER|${peerId}|ALL|Client ready|0|false`);
+      const wsUrl = "wss://webrtc-9gdy.onrender.com/"; // Replace with your WSS server
+      ws = new WebSocket(wsUrl);
 
-        pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+      ws.onopen = async () => {
+        log("✅ Connected to signaling server");
+        ws.send(`NEWPEER|${peerId}|ALL|New IP camera stream|0|true`);
 
-        pc.ontrack = (event) => {
-          log('Received remote track');
-          remoteVideo.srcObject = event.streams[0];
-        };
+        const config = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+        peerConnection = new RTCPeerConnection(config);
 
-        pc.onicecandidate = (e) => {
-          if(e.candidate){
-            ws.send(`CANDIDATE|${peerId}|ALL|${JSON.stringify(e.candidate)}`);
+        // Add IP camera video track
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+        peerConnection.onicecandidate = e => {
+          if (e.candidate) {
+            const candidateObj = {
+              sdpMid: e.candidate.sdpMid,
+              sdpMLineIndex: e.candidate.sdpMLineIndex,
+              candidate: e.candidate.candidate
+            };
+            ws.send(`CANDIDATE|${peerId}|ALL|${JSON.stringify(candidateObj)}`);
           }
         };
+
+        peerConnection.onconnectionstatechange = () => {
+          log(`🔄 Connection state: ${peerConnection.connectionState}`);
+        };
+
+        peerConnection.ontrack = event => {
+          remoteVideo.srcObject = event.streams[0];
+          log("🎥 Remote video stream received");
+        };
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        ws.send(`OFFER|${peerId}|ALL|${JSON.stringify({ type: "offer", sdp: offer.sdp })}`);
+        log("📤 Sent offer to all clients");
       };
 
-      ws.onmessage = async (event)=>{
-        const [type, senderId, , content] = event.data.split('|');
-        if(senderId===peerId) return;
+      ws.onmessage = async event => {
+        const [type, senderId, , msgContent] = event.data.split("|");
+        if (senderId === peerId) return;
 
-        switch(type){
-          case 'NEWPEER':
-            // Create offer to new sender
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            ws.send(`OFFER|${peerId}|${senderId}|${JSON.stringify(offer)}`);
-            log(`Sent offer to ${senderId}`);
+        switch (type) {
+          case "NEWPEER":
+            connectedPeers.add(senderId);
+            log(`👤 New peer connected: ${senderId}`);
+            updatePeerList();
             break;
 
-          case 'OFFER':
-            const offerObj = JSON.parse(content);
-            await pc.setRemoteDescription(new RTCSessionDescription(offerObj));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
+          case "DISCONNECT":
+            connectedPeers.delete(senderId);
+            log(`❌ Peer disconnected: ${senderId}`);
+            updatePeerList();
+            break;
+
+          case "OFFER":
+            log(`📨 Received offer from ${senderId}`);
+            const offerObj = JSON.parse(msgContent);
+
+            const config = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+            peerConnection = new RTCPeerConnection(config);
+
+            peerConnection.ontrack = event => {
+              remoteVideo.srcObject = event.streams[0];
+              log(`🎥 Receiving stream from ${senderId}`);
+            };
+
+            peerConnection.onicecandidate = e => {
+              if (e.candidate) {
+                const candidateObj = {
+                  sdpMid: e.candidate.sdpMid,
+                  sdpMLineIndex: e.candidate.sdpMLineIndex,
+                  candidate: e.candidate.candidate
+                };
+                ws.send(`CANDIDATE|${peerId}|${senderId}|${JSON.stringify(candidateObj)}`);
+              }
+            };
+
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(offerObj));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
             ws.send(`ANSWER|${peerId}|${senderId}|${JSON.stringify(answer)}`);
-            log(`Answered offer from ${senderId}`);
+            log(`📤 Sent answer to ${senderId}`);
             break;
 
-          case 'ANSWER':
-            const answerObj = JSON.parse(content);
-            await pc.setRemoteDescription(new RTCSessionDescription(answerObj));
-            log(`Received answer from ${senderId}`);
+          case "ANSWER":
+            const answerObj = JSON.parse(msgContent);
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(answerObj));
+            log(`✅ Answer applied from ${senderId}`);
             break;
 
-          case 'CANDIDATE':
-            const cand = JSON.parse(content);
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
-            log(`Added ICE candidate from ${senderId}`);
+          case "CANDIDATE":
+            const candidateObj = JSON.parse(msgContent);
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidateObj));
+            log(`🧊 ICE candidate added from ${senderId}`);
             break;
 
-          case 'DISPOSE':
-            log(`Peer ${senderId} disconnected`);
+          default:
+            log(`ℹ️ Unknown message type: ${type}`);
             break;
         }
       };
+
+      ws.onerror = (err) => log(`❌ WebSocket error: ${err.message}`, true);
+      ws.onclose = () => log("🔌 WebSocket connection closed");
     };
   </script>
 </body>
