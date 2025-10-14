@@ -59,7 +59,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>WebRTC Signaling Test Client</h1>
+        <h1>WebRTC Signaling Test Client (with TURN)</h1>
        
         <div class="video-container">
             <div>
@@ -292,6 +292,7 @@
             // Auto-scroll to the bottom
             detectionLog.scrollTop = detectionLog.scrollHeight;
         }
+        
         // Handle incoming signaling messages
         function handleSignalingMessage(message) {
             // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
@@ -353,7 +354,7 @@
             }
         }
        
-        // Create RTCPeerConnection for a specific peer
+        // Create RTCPeerConnection for a specific peer with TURN servers
         function createPeerConnection(remotePeerId) {
             if (peerConnections[remotePeerId]) {
                 log(`Connection with ${remotePeerId} already exists.`);
@@ -361,7 +362,29 @@
             }
             log(`Creating connection with ${remotePeerId}`);
 
-            const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+            // UPDATED: Added TURN servers for cross-network connectivity
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    {
+                        urls: 'turn:openrelay.metered.ca:80',
+                        username: 'openrelayproject',
+                        credential: 'openrelayproject'
+                    },
+                    {
+                        urls: 'turn:openrelay.metered.ca:443',
+                        username: 'openrelayproject',
+                        credential: 'openrelayproject'
+                    },
+                    {
+                        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                        username: 'openrelayproject',
+                        credential: 'openrelayproject'
+                    }
+                ],
+                iceCandidatePoolSize: 10
+            };
+            
             const pc = new RTCPeerConnection(configuration);
             peerConnections[remotePeerId] = pc;
 
@@ -381,6 +404,7 @@
                         candidate: event.candidate.candidate
                     };
                     ws.send(`CANDIDATE|${peerId}|${remotePeerId}|${JSON.stringify(candidateObj)}|0|true`);
+                    log(`Sent ICE candidate to ${remotePeerId} (type: ${event.candidate.type})`);
                 }
             };
 
@@ -405,10 +429,7 @@
             pc.onconnectionstatechange = () => {
                 log(`Connection state with ${remotePeerId}: ${pc.connectionState}`);
                 if (pc.connectionState === 'connected') {
-                    log(`Log: Video stream is sending to ${remotePeerId}.`);
-                }
-                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
-                    cleanupPeerConnection(remotePeerId);
+                    log(`✓ Video stream is sending to ${remotePeerId}.`);
                 }
             };
 
@@ -477,6 +498,7 @@
             try {
                 if (candidateObj.candidate) {
                     await pc.addIceCandidate(new RTCIceCandidate(candidateObj));
+                    log(`Added ICE candidate from ${senderId}`);
                 }
             } catch (error) {
                 log(`Error handling ICE candidate from ${senderId}: ${error.message}`, true);
