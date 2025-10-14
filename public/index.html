@@ -107,6 +107,11 @@
             <h3>Status Log</h3>
             <div id="statusLog" class="status"></div>
         </div>
+
+        <div>
+            <h3>Detection Log</h3>
+            <div id="detectionLog" class="status"></div>
+        </div>
     </div>
    
     <script>
@@ -125,7 +130,8 @@
         const fileSourceRadio = document.getElementById('fileSource');
         const fileInputContainer = document.getElementById('fileInputContainer');
         const videoFileInput = document.getElementById('videoFileInput');
-       
+        const detectionLog = document.getElementById('detectionLog');
+
         // WebRTC variables
         let localStream;
         const peerConnections = {}; // Use an object to store multiple peer connections
@@ -265,6 +271,27 @@
             }
         });
        
+        function updateDetectionLog(detections) {
+            // Clear previous detections
+            detectionLog.innerHTML = '';
+
+            if (detections && detections.length > 0) {
+                detections.forEach(det => {
+                    const logEntry = document.createElement('div');
+                    const box = det.box.join(', ');
+                    logEntry.textContent = 
+                        `[${new Date().toLocaleTimeString()}] Detected: ${det.class_name} ` +
+                        `(Conf: ${det.confidence.toFixed(2)}) at [${box}]`;
+                    detectionLog.appendChild(logEntry);
+                });
+            } else {
+                const logEntry = document.createElement('div');
+                logEntry.textContent = `[${new Date().toLocaleTimeString()}] No detections in this frame.`;
+                detectionLog.appendChild(logEntry);
+            }
+            // Auto-scroll to the bottom
+            detectionLog.scrollTop = detectionLog.scrollHeight;
+        }
         // Handle incoming signaling messages
         function handleSignalingMessage(message) {
             // Parse message format: TYPE|SENDER_ID|RECEIVER_ID|MESSAGE|CONNECTION_COUNT|IS_VIDEO_AUDIO_SENDER
@@ -307,7 +334,12 @@
                         handleCandidate(senderId, JSON.parse(msgContent));
                     }
                     break;
-                   
+                case 'DETECTION_DATA':
+                    if (senderId !== peerId) {
+                        const data = JSON.parse(msgContent);
+                        updateDetectionLog(data.detections);
+                    }
+                    break;
                 case 'DISPOSE':
                     if (senderId !== peerId) {
                         log(`Peer ${senderId} disconnected`);
