@@ -56,7 +56,7 @@
         </div>
 
         <!-- Video Streams -->
-        <div class="bg-white rounded-lg shadow-lg p-6">
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
             <h2 class="text-xl font-semibold text-gray-800 mb-4">Incoming Streams</h2>
             <div id="videoContainer" class="video-grid">
                 <!-- Videos will be added here dynamically -->
@@ -67,6 +67,14 @@
                 </svg>
                 <p class="text-lg text-gray-500">Waiting for video streams...</p>
                 <p class="text-sm text-gray-400 mt-2">Streams will appear here when senders connect</p>
+            </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Messages</h2>
+            <div id="messageContainer" class="bg-gray-50 rounded-lg p-4 h-48 overflow-y-auto">
+                <div class="text-gray-500 text-sm">No messages yet...</div>
             </div>
         </div>
 
@@ -93,6 +101,7 @@
         const videoContainer = document.getElementById('videoContainer');
         const noStreamsPlaceholder = document.getElementById('noStreamsPlaceholder');
         const logContainer = document.getElementById('logContainer');
+        const messageContainer = document.getElementById('messageContainer');
 
         // ICE servers configuration
         const iceServers = {
@@ -117,6 +126,25 @@
             logContainer.appendChild(entry);
             logContainer.scrollTop = logContainer.scrollHeight;
             console.log(message);
+        }
+
+        // Display message function
+        function displayMessage(senderId, message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'mb-2 p-2 bg-white rounded border-l-4 border-blue-500';
+            entry.innerHTML = `
+                <div class="text-xs text-gray-500">${timestamp} - ${senderId}</div>
+                <div class="text-sm text-gray-800 mt-1">${message}</div>
+            `;
+            
+            // Remove "no messages" placeholder if it exists
+            if (messageContainer.children.length === 1 && messageContainer.children[0].textContent.includes('No messages')) {
+                messageContainer.innerHTML = '';
+            }
+            
+            messageContainer.appendChild(entry);
+            messageContainer.scrollTop = messageContainer.scrollHeight;
         }
 
         // Initialize WebSocket connection
@@ -194,6 +222,25 @@
                     handleRemoteTrack(senderId, event.streams[0]);
                 };
                 
+                // Handle data channel
+                pc.ondatachannel = (event) => {
+                    const dataChannel = event.channel;
+                    log(`Data channel received from ${senderId}`, 'success');
+                    
+                    dataChannel.onopen = () => {
+                        log(`Data channel opened with ${senderId}`, 'success');
+                    };
+                    
+                    dataChannel.onmessage = (msgEvent) => {
+                        log(`Message from ${senderId}: ${msgEvent.data}`, 'info');
+                        displayMessage(senderId, msgEvent.data);
+                    };
+                    
+                    dataChannel.onclose = () => {
+                        log(`Data channel closed with ${senderId}`, 'warning');
+                    };
+                };
+                
                 // Handle ICE candidates
                 pc.onicecandidate = (event) => {
                     if (event.candidate) {
@@ -205,6 +252,9 @@
                 // Handle connection state changes
                 pc.onconnectionstatechange = () => {
                     log(`Connection state with ${senderId}: ${pc.connectionState}`);
+                    if (pc.connectionState === 'connected') {
+                        log(`✅ Connected to ${senderId}`, 'success');
+                    }
                     if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                         handleDispose(senderId);
                     }

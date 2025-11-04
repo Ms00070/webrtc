@@ -68,6 +68,17 @@
             </div>
         </div>
 
+        <!-- Message Controls -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Send Message</h2>
+            <div class="flex gap-2">
+                <input type="text" id="messageInput" placeholder="Type a message..." class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <button id="sendMessageBtn" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-lg transition duration-200 shadow-md" disabled>
+                    📤 Send
+                </button>
+            </div>
+        </div>
+
         <!-- Local Video Preview -->
         <div class="bg-white rounded-lg shadow-lg p-6">
             <h2 class="text-xl font-semibold text-gray-800 mb-4">Local Preview</h2>
@@ -99,6 +110,8 @@
         let localStream = null;
         let peerId = 'Sender_' + Math.random().toString(36).substr(2, 9);
         let peerConnections = new Map();
+        let dataChannels = new Map();
+        let knownReceivers = new Set();
         
         const wsStatusDot = document.getElementById('wsStatusDot');
         const wsStatus = document.getElementById('wsStatus');
@@ -111,6 +124,8 @@
         const startCameraBtn = document.getElementById('startCameraBtn');
         const startScreenBtn = document.getElementById('startScreenBtn');
         const stopBtn = document.getElementById('stopBtn');
+        const messageInput = document.getElementById('messageInput');
+        const sendMessageBtn = document.getElementById('sendMessageBtn');
 
         // ICE servers configuration
         const iceServers = {
@@ -181,19 +196,27 @@
             const senderId = parts[1];
             const receiverId = parts[2];
             const content = parts[3];
+            const isVideoSender = parts[5] === 'true';
             
             log(`Received ${type} from ${senderId}`);
             
             if (type === 'NEWPEER' && senderId !== peerId) {
-                // New receiver joined, create offer
-                if (localStream) {
-                    createPeerConnection(senderId);
+                // Track receivers (non-video senders)
+                if (!isVideoSender) {
+                    knownReceivers.add(senderId);
+                    log(`Receiver ${senderId} joined`, 'success');
+                    
+                    // Create peer connection if we have a stream
+                    if (localStream) {
+                        createPeerConnection(senderId);
+                    }
                 }
             } else if (type === 'ANSWER' && receiverId === peerId) {
                 handleAnswer(senderId, content);
             } else if (type === 'CANDIDATE' && receiverId === peerId) {
                 handleCandidate(senderId, content);
             } else if (type === 'DISPOSE') {
+                knownReceivers.delete(senderId);
                 handleDispose(senderId);
             }
         }
@@ -214,6 +237,27 @@
                 pc.addTrack(track, localStream);
             });
             
+            // Create data channel for messaging
+            const dataChannel = pc.createDataChannel('messages');
+            dataChannels.set(receiverId, dataChannel);
+            
+            dataChannel.onopen = () => {
+                log(`Data channel opened with ${receiverId}`, 'success');
+                sendMessageBtn.disabled = false;
+            };
+            
+            dataChannel.onclose = () => {
+                log(`Data channel closed with ${receiverId}`, 'warning');
+                dataChannels.delete(receiverId);
+                if (dataChannels.size === 0) {
+                    sendMessageBtn.disabled = true;
+                }
+            };
+            
+            dataChannel.onmessage = (event) => {
+                log(`Message from ${receiverId}: ${event.data}`, 'info');
+            };
+            
             // Handle ICE candidates
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
@@ -225,6 +269,9 @@
             // Handle connection state changes
             pc.onconnectionstatechange = () => {
                 log(`Connection state with ${receiverId}: ${pc.connectionState}`);
+                if (pc.connectionState === 'connected') {
+                    log(`✅ Connected to ${receiverId}`, 'success');
+                }
                 updateReceiverCount();
             };
             
@@ -268,6 +315,9 @@
                 log(`Closed connection with ${peerId}`, 'warning');
                 updateReceiverCount();
             }
+            if (dataChannels.has(peerId)) {
+                dataChannels.delete(peerId);
+            }
         }
 
         // Update receiver count
@@ -276,6 +326,34 @@
                 .filter(pc => pc.connectionState === 'connected').length;
             receiverCountElement.textContent = connectedCount;
         }
+
+        // Send message to all receivers
+        sendMessageBtn.addEventListener('click', () => {
+            const message = messageInput.value.trim();
+            if (!message) return;
+            
+            let sentCount = 0;
+            dataChannels.forEach((channel, receiverId) => {
+                if (channel.readyState === 'open') {
+                    channel.send(message);
+                    sentCount++;
+                }
+            });
+            
+            if (sentCount > 0) {
+                log(`Sent message to ${sentCount} receiver(s): "${message}"`, 'success');
+                messageInput.value = '';
+            } else {
+                log('No open data channels to send message', 'warning');
+            }
+        });
+
+        // Allow Enter key to send message
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !sendMessageBtn.disabled) {
+                sendMessageBtn.click();
+            }
+        });
 
         // Start camera
         startCameraBtn.addEventListener('click', async () => {
@@ -291,11 +369,10 @@
                 stopBtn.disabled = false;
                 log('Camera started', 'success');
                 
-                // Create connections for existing receivers
-                peerConnections.forEach((pc, receiverId) => {
-                    pc.close();
+                // Create connections for all known receivers
+                knownReceivers.forEach(receiverId => {
+                    createPeerConnection(receiverId);
                 });
-                peerConnections.clear();
             } catch (error) {
                 log(`Error accessing camera: ${error}`, 'error');
             }
