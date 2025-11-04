@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Receiver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-purple-50 to-pink-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-2xl">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">💬 Chat Receiver</h1>
+            <p class="text-gray-600">Receive messages from senders</p>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Connection Status</h2>
+            <div class="space-y-3">
+                <div class="flex items-center">
+                    <div class="w-3 h-3 rounded-full mr-3" id="statusDot"></div>
+                    <span class="font-medium text-gray-700">Status:</span>
+                    <span class="ml-2 text-gray-600" id="statusText">Disconnected</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Your ID:</span>
+                    <span class="ml-2 text-gray-600 font-mono text-sm" id="peerId">Not assigned</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Connected Senders:</span>
+                    <span class="ml-2 text-gray-600 font-bold" id="senderCount">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Send Reply -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Send Reply</h2>
+            <div class="flex gap-2">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="Type your reply..." 
+                    class="flex-1 px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                >
+                <button 
+                    id="sendBtn" 
+                    class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-8 rounded-lg transition duration-200 shadow-md disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    disabled
+                >
+                    📤 Send
+                </button>
+            </div>
+            <p class="text-sm text-gray-500 mt-2">Press Enter to send</p>
+        </div>
+
+        <!-- Messages -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Messages</h2>
+            <div id="messageContainer" class="bg-gray-50 rounded-lg p-4 h-96 overflow-y-auto space-y-2">
+                <div class="text-gray-500 text-sm text-center py-8">No messages yet...</div>
+            </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Activity Log</h2>
+            <div id="logContainer" class="bg-gray-50 rounded-lg p-4 h-48 overflow-y-auto font-mono text-xs text-gray-700">
+                <div class="text-gray-500">Waiting for connection...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket and messaging setup
+        let ws = null;
+        let peerId = 'Receiver_' + Math.random().toString(36).substr(2, 9);
+        let senders = new Map(); // Map of senderId -> WebSocket connection info
+        
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const peerIdElement = document.getElementById('peerId');
+        const senderCountElement = document.getElementById('senderCount');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const messageContainer = document.getElementById('messageContainer');
+        const logContainer = document.getElementById('logContainer');
+
+        // Logging function
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const colors = {
+                info: 'text-blue-600',
+                success: 'text-green-600',
+                error: 'text-red-600',
+                warning: 'text-yellow-600'
+            };
+            const entry = document.createElement('div');
+            entry.className = colors[type] || colors.info;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        // Display message function
+        function displayMessage(text, senderId, isSent = false) {
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            
+            if (messageContainer.children.length === 1 && messageContainer.children[0].textContent.includes('No messages')) {
+                messageContainer.innerHTML = '';
+            }
+            
+            if (isSent) {
+                entry.className = 'bg-purple-100 border-l-4 border-purple-500 p-3 rounded';
+                entry.innerHTML = `
+                    <div class="text-xs text-purple-600 font-semibold mb-1">You (${timestamp})</div>
+                    <div class="text-gray-800">${text}</div>
+                `;
+            } else {
+                entry.className = 'bg-blue-100 border-l-4 border-blue-500 p-3 rounded';
+                entry.innerHTML = `
+                    <div class="text-xs text-blue-600 font-semibold mb-1">${senderId} (${timestamp})</div>
+                    <div class="text-gray-800">${text}</div>
+                `;
+            }
+            
+            messageContainer.appendChild(entry);
+            messageContainer.scrollTop = messageContainer.scrollHeight;
+        }
+
+        // Update UI
+        function updateUI() {
+            senderCountElement.textContent = senders.size;
+            sendBtn.disabled = senders.size === 0;
+        }
+
+        // Connect to WebSocket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}`;
+            
+            log(`Connecting to ${wsUrl}...`);
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log('✅ Connected to server', 'success');
+                statusDot.className = 'w-3 h-3 rounded-full mr-3 bg-green-500';
+                statusText.textContent = 'Connected';
+                peerIdElement.textContent = peerId;
+                
+                // Announce as receiver
+                const message = `NEWPEER|${peerId}|ALL|Receiver joined|0|false`;
+                ws.send(message);
+                log('Announced as receiver', 'success');
+            };
+            
+            ws.onmessage = (event) => {
+                handleMessage(event.data);
+            };
+            
+            ws.onerror = (error) => {
+                log('❌ WebSocket error', 'error');
+                statusDot.className = 'w-3 h-3 rounded-full mr-3 bg-red-500';
+                statusText.textContent = 'Error';
+            };
+            
+            ws.onclose = () => {
+                log('⚠️ Disconnected from server', 'warning');
+                statusDot.className = 'w-3 h-3 rounded-full mr-3 bg-gray-400';
+                statusText.textContent = 'Disconnected';
+                senders.clear();
+                updateUI();
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        // Handle incoming messages
+        function handleMessage(message) {
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const content = parts[3];
+            const isVideoSender = parts[5] === 'true';
+            
+            if (type === 'NEWPEER' && senderId !== peerId && isVideoSender) {
+                // New sender joined
+                senders.set(senderId, { timestamp: Date.now() });
+                log(`✅ Sender joined: ${senderId}`, 'success');
+                updateUI();
+            } else if (type === 'MESSAGE' && receiverId === peerId) {
+                // Received a message from sender
+                log(`📨 Message from ${senderId}: ${content}`);
+                displayMessage(content, senderId, false);
+            } else if (type === 'DISPOSE' && senders.has(senderId)) {
+                // Sender disconnected
+                senders.delete(senderId);
+                log(`⚠️ Sender left: ${senderId}`, 'warning');
+                updateUI();
+            }
+        }
+
+        // Send message
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text || senders.size === 0) return;
+            
+            // Send to all senders
+            senders.forEach((info, senderId) => {
+                const message = `MESSAGE|${peerId}|${senderId}|${text}|0|false`;
+                ws.send(message);
+            });
+            
+            log(`📤 Sent to ${senders.size} sender(s): "${text}"`, 'success');
+            displayMessage(text, peerId, true);
+            messageInput.value = '';
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !sendBtn.disabled) {
+                sendMessage();
+            }
+        });
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>
