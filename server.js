@@ -48,6 +48,72 @@ app.get('/api/ready', (req, res) => {
   });
 });
 
+// Add endpoint to broadcast message to all connected clients
+app.get('/api/broadcast', (req, res) => {
+  const message = req.query.message;
+  
+  if (!message) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing message parameter',
+      usage: '/api/broadcast?message=your_message_here'
+    });
+  }
+
+  // Broadcast to all connected clients
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
+  let sentCount = 0;
+
+  clients.forEach((ws, clientId) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(broadcastMessage);
+      sentCount++;
+    }
+  });
+
+  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
+
+  res.json({
+    success: true,
+    message: message,
+    sentTo: sentCount,
+    clients: Array.from(clients.keys())
+  });
+});
+
+// POST endpoint for sending messages (more secure for sensitive data)
+app.post('/api/broadcast', (req, res) => {
+  const message = req.body.message;
+  
+  if (!message) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing message in request body',
+      usage: 'POST with JSON body: { "message": "your_message_here" }'
+    });
+  }
+
+  // Broadcast to all connected clients
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
+  let sentCount = 0;
+
+  clients.forEach((ws, clientId) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(broadcastMessage);
+      sentCount++;
+    }
+  });
+
+  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
+
+  res.json({
+    success: true,
+    message: message,
+    sentTo: sentCount,
+    clients: Array.from(clients.keys())
+  });
+});
+
 // Create HTTP server
 const server = http.createServer(app);
 

@@ -195,6 +195,23 @@
                 // Received a message from receiver
                 log(`📨 Message from ${senderId}: ${content}`);
                 displayMessage(content, false);
+            } else if (type === 'BROADCAST') {
+                // Broadcast message from server
+                log(`📢 Broadcast from SERVER: ${content}`, 'warning');
+                const timestamp = new Date().toLocaleTimeString();
+                const entry = document.createElement('div');
+                
+                if (messageContainer.children.length === 1 && messageContainer.children[0].textContent.includes('No messages')) {
+                    messageContainer.innerHTML = '';
+                }
+                
+                entry.className = 'bg-yellow-100 border-l-4 border-yellow-500 p-3 rounded';
+                entry.innerHTML = `
+                    <div class="text-xs text-yellow-700 font-semibold mb-1">📢 SERVER BROADCAST (${timestamp})</div>
+                    <div class="text-gray-800 font-medium">${content}</div>
+                `;
+                messageContainer.appendChild(entry);
+                messageContainer.scrollTop = messageContainer.scrollHeight;
             } else if (type === 'DISPOSE' && receivers.has(senderId)) {
                 // Receiver disconnected
                 receivers.delete(senderId);
