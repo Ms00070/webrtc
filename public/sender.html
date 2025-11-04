@@ -198,18 +198,23 @@
             const content = parts[3];
             const isVideoSender = parts[5] === 'true';
             
-            log(`Received ${type} from ${senderId}`);
+            log(`Received ${type} from ${senderId} (isVideoSender: ${isVideoSender})`);
             
             if (type === 'NEWPEER' && senderId !== peerId) {
                 // Track receivers (non-video senders)
                 if (!isVideoSender) {
                     knownReceivers.add(senderId);
-                    log(`Receiver ${senderId} joined`, 'success');
+                    log(`✅ Receiver ${senderId} joined (total: ${knownReceivers.size})`, 'success');
                     
                     // Create peer connection if we have a stream
                     if (localStream) {
+                        log(`Creating connection to ${senderId} (stream active)`, 'info');
                         createPeerConnection(senderId);
+                    } else {
+                        log(`Stream not ready, will connect when camera starts`, 'warning');
                     }
+                } else {
+                    log(`Ignoring video sender: ${senderId}`, 'warning');
                 }
             } else if (type === 'ANSWER' && receiverId === peerId) {
                 handleAnswer(senderId, content);
@@ -368,11 +373,18 @@
                 startScreenBtn.disabled = true;
                 stopBtn.disabled = false;
                 log('Camera started', 'success');
+                log(`Known receivers: ${knownReceivers.size}`, 'info');
                 
                 // Create connections for all known receivers
-                knownReceivers.forEach(receiverId => {
-                    createPeerConnection(receiverId);
-                });
+                if (knownReceivers.size > 0) {
+                    log(`Creating connections to ${knownReceivers.size} receiver(s)...`, 'info');
+                    knownReceivers.forEach(receiverId => {
+                        log(`Connecting to ${receiverId}...`, 'info');
+                        createPeerConnection(receiverId);
+                    });
+                } else {
+                    log('No receivers connected yet. Waiting for receivers...', 'warning');
+                }
             } catch (error) {
                 log(`Error accessing camera: ${error}`, 'error');
             }

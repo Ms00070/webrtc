@@ -163,7 +163,7 @@
                 // Announce this peer as a receiver
                 const message = `NEWPEER|${peerId}|ALL|Receiver joined|0|false`;
                 ws.send(message);
-                log('Announced as receiver', 'success');
+                log(`Announced as receiver: ${message}`, 'success');
             };
             
             ws.onmessage = (event) => {
