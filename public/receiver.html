@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Receiver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #10b981; }
+        .status-disconnected { background-color: #ef4444; }
+        .status-connecting { background-color: #f59e0b; animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1rem;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-purple-50 to-pink-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">WebRTC Receiver</h1>
+            <p class="text-gray-600">Receive video streams from senders</p>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Connection Status</h2>
+            <div class="space-y-3">
+                <div class="flex items-center">
+                    <span class="status-dot status-disconnected" id="wsStatusDot"></span>
+                    <span class="font-medium text-gray-700">WebSocket:</span>
+                    <span class="ml-2 text-gray-600" id="wsStatus">Disconnected</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Peer ID:</span>
+                    <span class="ml-2 text-gray-600 font-mono text-sm" id="peerId">Not assigned</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Active Streams:</span>
+                    <span class="ml-2 text-gray-600" id="streamCount">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Video Streams -->
+        <div class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Incoming Streams</h2>
+            <div id="videoContainer" class="video-grid">
+                <!-- Videos will be added here dynamically -->
+            </div>
+            <div id="noStreamsPlaceholder" class="text-center py-16">
+                <svg class="w-24 h-24 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                </svg>
+                <p class="text-lg text-gray-500">Waiting for video streams...</p>
+                <p class="text-sm text-gray-400 mt-2">Streams will appear here when senders connect</p>
+            </div>
+        </div>
+
+        <!-- Debug Log -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Activity Log</h2>
+            <div id="logContainer" class="bg-gray-50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm text-gray-700">
+                <div class="text-gray-500">Waiting for connection...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket and WebRTC setup
+        let ws = null;
+        let peerId = 'Receiver_' + Math.random().toString(36).substr(2, 9);
+        let peerConnections = new Map();
+        let remoteStreams = new Map();
+        
+        const wsStatusDot = document.getElementById('wsStatusDot');
+        const wsStatus = document.getElementById('wsStatus');
+        const peerIdElement = document.getElementById('peerId');
+        const streamCountElement = document.getElementById('streamCount');
+        const videoContainer = document.getElementById('videoContainer');
+        const noStreamsPlaceholder = document.getElementById('noStreamsPlaceholder');
+        const logContainer = document.getElementById('logContainer');
+
+        // ICE servers configuration
+        const iceServers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Logging function
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const colors = {
+                info: 'text-blue-600',
+                success: 'text-green-600',
+                error: 'text-red-600',
+                warning: 'text-yellow-600'
+            };
+            const entry = document.createElement('div');
+            entry.className = colors[type] || colors.info;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log('WebSocket connected', 'success');
+                wsStatusDot.className = 'status-dot status-connected';
+                wsStatus.textContent = 'Connected';
+                peerIdElement.textContent = peerId;
+                
+                // Announce this peer as a receiver
+                const message = `NEWPEER|${peerId}|ALL|Receiver joined|0|false`;
+                ws.send(message);
+                log('Announced as receiver', 'success');
+            };
+            
+            ws.onmessage = (event) => {
+                handleSignalingMessage(event.data);
+            };
+            
+            ws.onerror = (error) => {
+                log('WebSocket error: ' + error, 'error');
+                wsStatusDot.className = 'status-dot status-disconnected';
+                wsStatus.textContent = 'Error';
+            };
+            
+            ws.onclose = () => {
+                log('WebSocket disconnected', 'warning');
+                wsStatusDot.className = 'status-dot status-disconnected';
+                wsStatus.textContent = 'Disconnected';
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        // Handle signaling messages
+        function handleSignalingMessage(message) {
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const content = parts[3];
+            const isVideoSender = parts[5] === 'true';
+            
+            log(`Received ${type} from ${senderId}`);
+            
+            if (type === 'NEWPEER' && senderId !== peerId && isVideoSender) {
+                // New video sender joined, wait for offer
+                log(`Video sender ${senderId} is available`, 'success');
+            } else if (type === 'OFFER' && receiverId === peerId) {
+                handleOffer(senderId, content);
+            } else if (type === 'CANDIDATE' && receiverId === peerId) {
+                handleCandidate(senderId, content);
+            } else if (type === 'DISPOSE') {
+                handleDispose(senderId);
+            }
+        }
+
+        // Handle offer from sender
+        function handleOffer(senderId, offerJson) {
+            log(`Handling offer from ${senderId}`);
+            
+            // Create peer connection if it doesn't exist
+            if (!peerConnections.has(senderId)) {
+                const pc = new RTCPeerConnection(iceServers);
+                peerConnections.set(senderId, pc);
+                
+                // Handle incoming tracks
+                pc.ontrack = (event) => {
+                    log(`Received track from ${senderId}`, 'success');
+                    handleRemoteTrack(senderId, event.streams[0]);
+                };
+                
+                // Handle ICE candidates
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        const message = `CANDIDATE|${peerId}|${senderId}|${JSON.stringify(event.candidate)}|0|false`;
+                        ws.send(message);
+                    }
+                };
+                
+                // Handle connection state changes
+                pc.onconnectionstatechange = () => {
+                    log(`Connection state with ${senderId}: ${pc.connectionState}`);
+                    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                        handleDispose(senderId);
+                    }
+                };
+            }
+            
+            const pc = peerConnections.get(senderId);
+            const offer = JSON.parse(offerJson);
+            
+            pc.setRemoteDescription(new RTCSessionDescription(offer))
+                .then(() => pc.createAnswer())
+                .then(answer => pc.setLocalDescription(answer))
+                .then(() => {
+                    const message = `ANSWER|${peerId}|${senderId}|${JSON.stringify(pc.localDescription)}|0|false`;
+                    ws.send(message);
+                    log(`Sent answer to ${senderId}`, 'success');
+                })
+                .catch(error => log(`Error handling offer: ${error}`, 'error'));
+        }
+
+        // Handle ICE candidate
+        function handleCandidate(senderId, candidateJson) {
+            const pc = peerConnections.get(senderId);
+            if (pc) {
+                const candidate = JSON.parse(candidateJson);
+                pc.addIceCandidate(new RTCIceCandidate(candidate))
+                    .catch(error => log(`Error adding ICE candidate: ${error}`, 'error'));
+            }
+        }
+
+        // Handle remote track
+        function handleRemoteTrack(senderId, stream) {
+            if (remoteStreams.has(senderId)) {
+                return; // Already have this stream
+            }
+            
+            remoteStreams.set(senderId, stream);
+            updateStreamCount();
+            
+            // Create video element
+            const videoWrapper = document.createElement('div');
+            videoWrapper.id = `video-${senderId}`;
+            videoWrapper.className = 'relative bg-gray-900 rounded-lg overflow-hidden shadow-lg';
+            videoWrapper.style.aspectRatio = '16/9';
+            
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.playsinline = true;
+            video.className = 'w-full h-full object-contain';
+            video.srcObject = stream;
+            
+            const label = document.createElement('div');
+            label.className = 'absolute top-2 left-2 bg-black bg-opacity-70 text-white px-3 py-1 rounded-full text-sm font-mono';
+            label.textContent = senderId;
+            
+            const statusIndicator = document.createElement('div');
+            statusIndicator.className = 'absolute top-2 right-2 bg-green-500 w-3 h-3 rounded-full';
+            
+            videoWrapper.appendChild(video);
+            videoWrapper.appendChild(label);
+            videoWrapper.appendChild(statusIndicator);
+            
+            videoContainer.appendChild(videoWrapper);
+            noStreamsPlaceholder.style.display = 'none';
+            
+            log(`Added video stream from ${senderId}`, 'success');
+        }
+
+        // Handle peer disposal
+        function handleDispose(senderId) {
+            if (peerConnections.has(senderId)) {
+                peerConnections.get(senderId).close();
+                peerConnections.delete(senderId);
+                log(`Closed connection with ${senderId}`, 'warning');
+            }
+            
+            if (remoteStreams.has(senderId)) {
+                remoteStreams.delete(senderId);
+                const videoElement = document.getElementById(`video-${senderId}`);
+                if (videoElement) {
+                    videoElement.remove();
+                }
+                updateStreamCount();
+                
+                if (remoteStreams.size === 0) {
+                    noStreamsPlaceholder.style.display = 'block';
+                }
+            }
+        }
+
+        // Update stream count
+        function updateStreamCount() {
+            streamCountElement.textContent = remoteStreams.size;
+        }
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>

@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Sender</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #10b981; }
+        .status-disconnected { background-color: #ef4444; }
+        .status-connecting { background-color: #f59e0b; animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">WebRTC Sender</h1>
+            <p class="text-gray-600">Share your camera and screen with receivers</p>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Connection Status</h2>
+            <div class="space-y-3">
+                <div class="flex items-center">
+                    <span class="status-dot status-disconnected" id="wsStatusDot"></span>
+                    <span class="font-medium text-gray-700">WebSocket:</span>
+                    <span class="ml-2 text-gray-600" id="wsStatus">Disconnected</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Peer ID:</span>
+                    <span class="ml-2 text-gray-600 font-mono text-sm" id="peerId">Not assigned</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="font-medium text-gray-700">Connected Receivers:</span>
+                    <span class="ml-2 text-gray-600" id="receiverCount">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Video Controls -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Video Source</h2>
+            <div class="space-y-4">
+                <div class="flex gap-4">
+                    <button id="startCameraBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 shadow-md">
+                        📹 Start Camera
+                    </button>
+                    <button id="startScreenBtn" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 shadow-md">
+                        🖥️ Share Screen
+                    </button>
+                    <button id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 shadow-md" disabled>
+                        ⏹️ Stop
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Local Video Preview -->
+        <div class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Local Preview</h2>
+            <div class="relative bg-gray-900 rounded-lg overflow-hidden" style="aspect-ratio: 16/9;">
+                <video id="localVideo" autoplay muted playsinline class="w-full h-full object-contain"></video>
+                <div id="noVideoPlaceholder" class="absolute inset-0 flex items-center justify-center text-gray-400">
+                    <div class="text-center">
+                        <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                        <p class="text-lg">No video source selected</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Debug Log -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Activity Log</h2>
+            <div id="logContainer" class="bg-gray-50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm text-gray-700">
+                <div class="text-gray-500">Waiting for connection...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket and WebRTC setup
+        let ws = null;
+        let localStream = null;
+        let peerId = 'Sender_' + Math.random().toString(36).substr(2, 9);
+        let peerConnections = new Map();
+        
+        const wsStatusDot = document.getElementById('wsStatusDot');
+        const wsStatus = document.getElementById('wsStatus');
+        const peerIdElement = document.getElementById('peerId');
+        const receiverCountElement = document.getElementById('receiverCount');
+        const localVideo = document.getElementById('localVideo');
+        const noVideoPlaceholder = document.getElementById('noVideoPlaceholder');
+        const logContainer = document.getElementById('logContainer');
+        
+        const startCameraBtn = document.getElementById('startCameraBtn');
+        const startScreenBtn = document.getElementById('startScreenBtn');
+        const stopBtn = document.getElementById('stopBtn');
+
+        // ICE servers configuration
+        const iceServers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Logging function
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const colors = {
+                info: 'text-blue-600',
+                success: 'text-green-600',
+                error: 'text-red-600',
+                warning: 'text-yellow-600'
+            };
+            const entry = document.createElement('div');
+            entry.className = colors[type] || colors.info;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log('WebSocket connected', 'success');
+                wsStatusDot.className = 'status-dot status-connected';
+                wsStatus.textContent = 'Connected';
+                peerIdElement.textContent = peerId;
+                
+                // Announce this peer as a video sender
+                const message = `NEWPEER|${peerId}|ALL|Sender joined|0|true`;
+                ws.send(message);
+                log('Announced as video sender', 'success');
+            };
+            
+            ws.onmessage = (event) => {
+                handleSignalingMessage(event.data);
+            };
+            
+            ws.onerror = (error) => {
+                log('WebSocket error: ' + error, 'error');
+                wsStatusDot.className = 'status-dot status-disconnected';
+                wsStatus.textContent = 'Error';
+            };
+            
+            ws.onclose = () => {
+                log('WebSocket disconnected', 'warning');
+                wsStatusDot.className = 'status-dot status-disconnected';
+                wsStatus.textContent = 'Disconnected';
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        // Handle signaling messages
+        function handleSignalingMessage(message) {
+            const parts = message.split('|');
+            const type = parts[0];
+            const senderId = parts[1];
+            const receiverId = parts[2];
+            const content = parts[3];
+            
+            log(`Received ${type} from ${senderId}`);
+            
+            if (type === 'NEWPEER' && senderId !== peerId) {
+                // New receiver joined, create offer
+                if (localStream) {
+                    createPeerConnection(senderId);
+                }
+            } else if (type === 'ANSWER' && receiverId === peerId) {
+                handleAnswer(senderId, content);
+            } else if (type === 'CANDIDATE' && receiverId === peerId) {
+                handleCandidate(senderId, content);
+            } else if (type === 'DISPOSE') {
+                handleDispose(senderId);
+            }
+        }
+
+        // Create peer connection
+        function createPeerConnection(receiverId) {
+            if (peerConnections.has(receiverId)) {
+                log(`Peer connection already exists for ${receiverId}`, 'warning');
+                return;
+            }
+            
+            log(`Creating peer connection for ${receiverId}`);
+            const pc = new RTCPeerConnection(iceServers);
+            peerConnections.set(receiverId, pc);
+            
+            // Add local stream tracks
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+            
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const message = `CANDIDATE|${peerId}|${receiverId}|${JSON.stringify(event.candidate)}|0|true`;
+                    ws.send(message);
+                }
+            };
+            
+            // Handle connection state changes
+            pc.onconnectionstatechange = () => {
+                log(`Connection state with ${receiverId}: ${pc.connectionState}`);
+                updateReceiverCount();
+            };
+            
+            // Create and send offer
+            pc.createOffer()
+                .then(offer => pc.setLocalDescription(offer))
+                .then(() => {
+                    const message = `OFFER|${peerId}|${receiverId}|${JSON.stringify(pc.localDescription)}|0|true`;
+                    ws.send(message);
+                    log(`Sent offer to ${receiverId}`, 'success');
+                })
+                .catch(error => log(`Error creating offer: ${error}`, 'error'));
+        }
+
+        // Handle answer from receiver
+        function handleAnswer(senderId, answerJson) {
+            const pc = peerConnections.get(senderId);
+            if (pc) {
+                const answer = JSON.parse(answerJson);
+                pc.setRemoteDescription(new RTCSessionDescription(answer))
+                    .then(() => log(`Set remote description from ${senderId}`, 'success'))
+                    .catch(error => log(`Error setting remote description: ${error}`, 'error'));
+            }
+        }
+
+        // Handle ICE candidate
+        function handleCandidate(senderId, candidateJson) {
+            const pc = peerConnections.get(senderId);
+            if (pc) {
+                const candidate = JSON.parse(candidateJson);
+                pc.addIceCandidate(new RTCIceCandidate(candidate))
+                    .catch(error => log(`Error adding ICE candidate: ${error}`, 'error'));
+            }
+        }
+
+        // Handle peer disposal
+        function handleDispose(peerId) {
+            if (peerConnections.has(peerId)) {
+                peerConnections.get(peerId).close();
+                peerConnections.delete(peerId);
+                log(`Closed connection with ${peerId}`, 'warning');
+                updateReceiverCount();
+            }
+        }
+
+        // Update receiver count
+        function updateReceiverCount() {
+            const connectedCount = Array.from(peerConnections.values())
+                .filter(pc => pc.connectionState === 'connected').length;
+            receiverCountElement.textContent = connectedCount;
+        }
+
+        // Start camera
+        startCameraBtn.addEventListener('click', async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 1280, height: 720 }, 
+                    audio: true 
+                });
+                localVideo.srcObject = localStream;
+                noVideoPlaceholder.style.display = 'none';
+                startCameraBtn.disabled = true;
+                startScreenBtn.disabled = true;
+                stopBtn.disabled = false;
+                log('Camera started', 'success');
+                
+                // Create connections for existing receivers
+                peerConnections.forEach((pc, receiverId) => {
+                    pc.close();
+                });
+                peerConnections.clear();
+            } catch (error) {
+                log(`Error accessing camera: ${error}`, 'error');
+            }
+        });
+
+        // Start screen share
+        startScreenBtn.addEventListener('click', async () => {
+            try {
+                localStream = await navigator.mediaDevices.getDisplayMedia({ 
+                    video: { width: 1920, height: 1080 }, 
+                    audio: true 
+                });
+                localVideo.srcObject = localStream;
+                noVideoPlaceholder.style.display = 'none';
+                startCameraBtn.disabled = true;
+                startScreenBtn.disabled = true;
+                stopBtn.disabled = false;
+                log('Screen sharing started', 'success');
+                
+                // Handle screen share stop
+                localStream.getVideoTracks()[0].onended = () => {
+                    stopStreaming();
+                };
+            } catch (error) {
+                log(`Error accessing screen: ${error}`, 'error');
+            }
+        });
+
+        // Stop streaming
+        stopBtn.addEventListener('click', stopStreaming);
+
+        function stopStreaming() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+                localVideo.srcObject = null;
+                noVideoPlaceholder.style.display = 'flex';
+                startCameraBtn.disabled = false;
+                startScreenBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                // Close all peer connections
+                peerConnections.forEach(pc => pc.close());
+                peerConnections.clear();
+                updateReceiverCount();
+                
+                log('Streaming stopped', 'warning');
+            }
+        }
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>
