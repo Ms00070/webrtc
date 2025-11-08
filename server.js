@@ -60,24 +60,33 @@ app.get('/api/broadcast', (req, res) => {
     });
   }
 
-  // Broadcast to all connected clients
-  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
+  // Format the broadcast message with timestamp
+  const timestamp = Date.now();
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|${timestamp}|false`;
   let sentCount = 0;
+  const sentToClients = [];
 
   clients.forEach((ws, clientId) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(broadcastMessage);
       sentCount++;
+      sentToClients.push(clientId);
+      console.log(`✓ Sent to ${clientId}: ${broadcastMessage}`);
+    } else {
+      console.log(`✗ Skipped ${clientId}: WebSocket not open (state: ${ws.readyState})`);
     }
   });
 
-  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
+  console.log(`📢 Broadcast message to ${sentCount}/${clients.size} clients: "${message}"`);
 
   res.json({
     success: true,
     message: message,
+    broadcastFormat: broadcastMessage,
     sentTo: sentCount,
-    clients: Array.from(clients.keys())
+    totalClients: clients.size,
+    clients: sentToClients,
+    timestamp: timestamp
   });
 });
 
@@ -93,24 +102,33 @@ app.post('/api/broadcast', (req, res) => {
     });
   }
 
-  // Broadcast to all connected clients
-  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
+  // Format the broadcast message with timestamp
+  const timestamp = Date.now();
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|${timestamp}|false`;
   let sentCount = 0;
+  const sentToClients = [];
 
   clients.forEach((ws, clientId) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(broadcastMessage);
       sentCount++;
+      sentToClients.push(clientId);
+      console.log(`✓ Sent to ${clientId}: ${broadcastMessage}`);
+    } else {
+      console.log(`✗ Skipped ${clientId}: WebSocket not open (state: ${ws.readyState})`);
     }
   });
 
-  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
+  console.log(`📢 Broadcast message to ${sentCount}/${clients.size} clients: "${message}"`);
 
   res.json({
     success: true,
     message: message,
+    broadcastFormat: broadcastMessage,
     sentTo: sentCount,
-    clients: Array.from(clients.keys())
+    totalClients: clients.size,
+    clients: sentToClients,
+    timestamp: timestamp
   });
 });
 
