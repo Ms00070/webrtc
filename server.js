@@ -60,35 +60,24 @@ app.get('/api/broadcast', (req, res) => {
     });
   }
 
-  // Format the broadcast message with timestamp
-  const timestamp = Date.now();
+  // Broadcast to all connected clients
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
   let sentCount = 0;
-  const sentToClients = [];
 
-  // Send as DATA type so Unity's WebRTCManager forwards it to DataChannel event
   clients.forEach((ws, clientId) => {
     if (ws.readyState === WebSocket.OPEN) {
-      // Format: DATA|SENDER_ID|RECEIVER_ID|MESSAGE_CONTENT
-      const dataMessage = `DATA|SERVER|${clientId}|BROADCAST:${message}:${timestamp}`;
-      ws.send(dataMessage);
+      ws.send(broadcastMessage);
       sentCount++;
-      sentToClients.push(clientId);
-      console.log(`✓ Sent to ${clientId}: ${dataMessage}`);
-    } else {
-      console.log(`✗ Skipped ${clientId}: WebSocket not open (state: ${ws.readyState})`);
     }
   });
 
-  console.log(`📢 Broadcast DATA message to ${sentCount}/${clients.size} clients: "${message}"`);
+  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
 
   res.json({
     success: true,
     message: message,
-    messageFormat: `BROADCAST:${message}:${timestamp}`,
     sentTo: sentCount,
-    totalClients: clients.size,
-    clients: sentToClients,
-    timestamp: timestamp
+    clients: Array.from(clients.keys())
   });
 });
 
@@ -104,35 +93,24 @@ app.post('/api/broadcast', (req, res) => {
     });
   }
 
-  // Format the broadcast message with timestamp
-  const timestamp = Date.now();
+  // Broadcast to all connected clients
+  const broadcastMessage = `BROADCAST|SERVER|ALL|${message}|0|false`;
   let sentCount = 0;
-  const sentToClients = [];
 
-  // Send as DATA type so Unity's WebRTCManager forwards it to DataChannel event
   clients.forEach((ws, clientId) => {
     if (ws.readyState === WebSocket.OPEN) {
-      // Format: DATA|SENDER_ID|RECEIVER_ID|MESSAGE_CONTENT
-      const dataMessage = `DATA|SERVER|${clientId}|BROADCAST:${message}:${timestamp}`;
-      ws.send(dataMessage);
+      ws.send(broadcastMessage);
       sentCount++;
-      sentToClients.push(clientId);
-      console.log(`✓ Sent to ${clientId}: ${dataMessage}`);
-    } else {
-      console.log(`✗ Skipped ${clientId}: WebSocket not open (state: ${ws.readyState})`);
     }
   });
 
-  console.log(`📢 Broadcast DATA message to ${sentCount}/${clients.size} clients: "${message}"`);
+  console.log(`Broadcast message to ${sentCount} clients: "${message}"`);
 
   res.json({
     success: true,
     message: message,
-    messageFormat: `BROADCAST:${message}:${timestamp}`,
     sentTo: sentCount,
-    totalClients: clients.size,
-    clients: sentToClients,
-    timestamp: timestamp
+    clients: Array.from(clients.keys())
   });
 });
 
